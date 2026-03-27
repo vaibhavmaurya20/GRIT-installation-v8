@@ -1,0 +1,252 @@
+// ============================================================
+//  GRIT v8 — x86_64 Instruction Encoder
+//  Each function returns [int] (raw machine code bytes).
+//  Register numbers: RAX=0 RCX=1 RDX=2 RBX=3 RSP=4 RBP=5 RSI=6 RDI=7
+//  Arg registers: RDI=7 RSI=6 RDX=2 RCX=1 R8=8 R9=9
+//  Return: RAX=0  Scratch: RAX RCX RDX  Saved: RBX RBP R12-R15
+// ============================================================
+
+// Handy register constants
+const RAX = 0
+const RCX = 1
+const RDX = 2
+const RBX = 3
+const RSP = 4
+const RBP = 5
+const RSI = 6
+const RDI = 7
+const R8  = 8
+const R9  = 9
+const R10 = 10
+const R11 = 11
+
+// REX prefix helpers
+fn rex_w -> int => 0x48          // REX.W (64-bit operand)
+fn rex_wr -> int => 0x4C         // REX.W + REX.R (for r8-r15 in reg field)
+fn rex_wb -> int => 0x49         // REX.W + REX.B (for r8-r15 in rm/opcode field)
+fn rex_wrb -> int => 0x4D        // REX.W + REX.R + REX.B
+
+fn modrm reg rm -> int
+    // mod=11 (register direct), reg, rm
+    0xC0 | ((reg & 7) << 3) | (rm & 7)
+
+fn modrm_disp8 reg base -> int
+    // mod=01 (disp8), reg, base
+    0x40 | ((reg & 7) << 3) | (base & 7)
+
+fn modrm_disp32 reg base -> int
+    // mod=10 (disp32), reg, base
+    0x80 | ((reg & 7) << 3) | (base & 7)
+
+fn modrm_rip reg -> int
+    // mod=00, rm=101 (RIP-relative)
+    ((reg & 7) << 3) | 5
+
+// ── Move instructions ─────────────────────────────────────────
+
+fn mov_r64_imm64 dst:int imm:int -> [int]
+    // MOV r64, imm64   (REX.W B8+rd imm64)
+    let rex = if dst >= 8 then rex_wb() else rex_w()
+    let op  = 0xB8 | (dst & 7)
+    b_cat3([rex, op], b_u64(imm), [])
+
+fn mov_r64_r64 dst:int src:int -> [int]
+    // MOV r64, r64   (REX.W 89 /r)
+    let rex = if dst >= 8 || src >= 8 then rex_wrb() else rex_w()
+    [rex, 0x89, modrm(src, dst)]
+
+fn mov_r64_rbpoff dst:int off:int -> [int]
+    // MOV r64, [rbp + off]   (REX.W 8B /r modrm disp)
+    let rex = if dst >= 8 then rex_wr() else rex_w()
+    if off >= -128 && off <= 127
+        [rex, 0x8B, modrm_disp8(dst, RBP)] + b_u8(off & 0xFF)
+    else
+        [rex, 0x8B, modrm_disp32(dst, RBP)] + b_u32(off)
+
+fn mov_rbpoff_r64 off:int src:int -> [int]
+    // MOV [rbp + off], r64   (REX.W 89 /r modrm disp)
+    let rex = if src >= 8 then rex_wr() else rex_w()
+    if off >= -128 && off <= 127
+        [rex, 0x89, modrm_disp8(src, RBP)] + b_u8(off & 0xFF)
+    else
+        [rex, 0x89, modrm_disp32(src, RBP)] + b_u32(off)
+
+fn mov_r64_imm32 dst:int imm:int -> [int]
+    // MOV r/m64, imm32 sign-extended  (REX.W C7 /0 imm32)
+    let rex = if dst >= 8 then rex_wb() else rex_w()
+    [rex, 0xC7, 0xC0 | (dst & 7)] + b_u32(imm)
+
+fn lea_rip_rel dst:int rel32:int -> [int]
+    // LEA r64, [RIP + rel32]  (REX.W 8D /r modrm_rip rel32)
+    let rex = if dst >= 8 then rex_wr() else rex_w()
+    [rex, 0x8D, modrm_rip(dst)] + b_u32(rel32)
+
+// ── Stack operations ──────────────────────────────────────────
+
+fn push_r64 r:int -> [int]
+    if r >= 8
+        [0x41, 0x50 | (r & 7)]
+    else
+        [0x50 | r]
+
+fn pop_r64 r:int -> [int]
+    if r >= 8
+        [0x41, 0x58 | (r & 7)]
+    else
+        [0x58 | r]
+
+fn push_imm32 imm:int -> [int]
+    [0x68] + b_u32(imm)
+
+fn push_imm8 imm:int -> [int]
+    [0x6A, imm & 0xFF]
+
+// ── Arithmetic ────────────────────────────────────────────────
+
+fn add_r64_r64 dst:int src:int -> [int]
+    // ADD r64, r64  (REX.W 01 /r)
+    [rex_w(), 0x01, modrm(src, dst)]
+
+fn sub_r64_r64 dst:int src:int -> [int]
+    // SUB r64, r64  (REX.W 29 /r)
+    [rex_w(), 0x29, modrm(src, dst)]
+
+fn imul_r64_r64 dst:int src:int -> [int]
+    // IMUL r64, r/m64  (REX.W 0F AF /r)
+    [rex_w(), 0x0F, 0xAF, modrm(dst, src)]
+
+fn idiv_r64 divisor:int -> [int]
+    // CQO (sign-extend RAX into RDX:RAX)  then IDIV r64
+    [rex_w(), 0x99, rex_w(), 0xF7, 0xF8 | (divisor & 7)]
+
+fn neg_r64 r:int -> [int]
+    [rex_w(), 0xF7, 0xD8 | (r & 7)]
+
+fn add_r64_imm32 dst:int imm:int -> [int]
+    // ADD r/m64, imm32  (REX.W 81 /0 imm32)
+    [rex_w(), 0x81, 0xC0 | (dst & 7)] + b_u32(imm)
+
+fn sub_r64_imm32 dst:int imm:int -> [int]
+    // SUB r/m64, imm32  (REX.W 81 /5 imm32)
+    [rex_w(), 0x81, 0xE8 | (dst & 7)] + b_u32(imm)
+
+fn and_r64_r64 dst:int src:int -> [int]
+    [rex_w(), 0x21, modrm(src, dst)]
+
+fn or_r64_r64 dst:int src:int -> [int]
+    [rex_w(), 0x09, modrm(src, dst)]
+
+fn xor_r64_r64 dst:int src:int -> [int]
+    [rex_w(), 0x31, modrm(src, dst)]
+
+fn not_r64 r:int -> [int]
+    [rex_w(), 0xF7, 0xD0 | (r & 7)]
+
+fn shl_r64_cl r:int -> [int]
+    [rex_w(), 0xD3, 0xE0 | (r & 7)]
+
+fn sar_r64_cl r:int -> [int]
+    [rex_w(), 0xD3, 0xF8 | (r & 7)]
+
+// ── Comparison & branching ────────────────────────────────────
+
+fn cmp_r64_r64 a:int b:int -> [int]
+    // CMP r64, r/m64  (REX.W 3B /r)
+    [rex_w(), 0x3B, modrm(a, b)]
+
+fn cmp_r64_imm32 r:int imm:int -> [int]
+    // CMP r/m64, imm32  (REX.W 81 /7 imm32)
+    [rex_w(), 0x81, 0xF8 | (r & 7)] + b_u32(imm)
+
+fn test_r64_r64 a:int b:int -> [int]
+    // TEST r64, r/m64  (REX.W 85 /r)
+    [rex_w(), 0x85, modrm(a, b)]
+
+fn jmp_rel32 rel:int -> [int]
+    [0xE9] + b_u32(rel)
+
+fn je_rel32 rel:int -> [int]
+    [0x0F, 0x84] + b_u32(rel)
+
+fn jne_rel32 rel:int -> [int]
+    [0x0F, 0x85] + b_u32(rel)
+
+fn jl_rel32 rel:int -> [int]
+    [0x0F, 0x8C] + b_u32(rel)
+
+fn jle_rel32 rel:int -> [int]
+    [0x0F, 0x8E] + b_u32(rel)
+
+fn jg_rel32 rel:int -> [int]
+    [0x0F, 0x8F] + b_u32(rel)
+
+fn jge_rel32 rel:int -> [int]
+    [0x0F, 0x8D] + b_u32(rel)
+
+// Conditional set to 0 or 1 in register
+fn setl_al -> [int] => [0x0F, 0x9C, 0xC0]   // SETL AL
+fn setle_al -> [int] => [0x0F, 0x9E, 0xC0]
+fn setg_al -> [int] => [0x0F, 0x9F, 0xC0]
+fn setge_al -> [int] => [0x0F, 0x9D, 0xC0]
+fn sete_al -> [int] => [0x0F, 0x94, 0xC0]
+fn setne_al -> [int] => [0x0F, 0x95, 0xC0]
+
+fn movzx_rax_al -> [int] => [0x48, 0x0F, 0xB6, 0xC0]  // MOVZX RAX, AL
+
+// ── Function call/return ──────────────────────────────────────
+
+fn call_rel32 rel:int -> [int]
+    [0xE8] + b_u32(rel)
+
+fn ret_near -> [int] => [0xC3]
+
+fn syscall_op -> [int] => [0x0F, 0x05]
+
+fn nop_op -> [int] => [0x90]
+
+// ── Function prologue/epilogue ────────────────────────────────
+
+fn fn_prologue frame_size:int -> [int]
+    // push rbp; mov rbp,rsp; sub rsp,N (align to 16)
+    let aligned = if frame_size % 16 == 0 then frame_size else frame_size + (16 - frame_size % 16)
+    push_r64(RBP) + mov_r64_r64(RBP, RSP) + sub_r64_imm32(RSP, aligned)
+
+fn fn_epilogue -> [int]
+    // mov rsp,rbp; pop rbp; ret
+    mov_r64_r64(RSP, RBP) + pop_r64(RBP) + ret_near()
+
+// ── Memory access ─────────────────────────────────────────────
+
+fn mov_r64_mem64 dst:int base:int off:int -> [int]
+    // MOV r64, [base + off]
+    let rex = if dst >= 8 then rex_wr() else rex_w()
+    if off == 0 && base != RBP
+        [rex, 0x8B, (dst & 7) << 3 | (base & 7)]
+    else if off >= -128 && off <= 127
+        [rex, 0x8B, modrm_disp8(dst, base)] + b_u8(off & 0xFF)
+    else
+        [rex, 0x8B, modrm_disp32(dst, base)] + b_u32(off)
+
+fn mov_mem64_r64 base:int off:int src:int -> [int]
+    // MOV [base + off], r64
+    let rex = if src >= 8 then rex_wr() else rex_w()
+    if off == 0 && base != RBP
+        [rex, 0x89, (src & 7) << 3 | (base & 7)]
+    else if off >= -128 && off <= 127
+        [rex, 0x89, modrm_disp8(src, base)] + b_u8(off & 0xFF)
+    else
+        [rex, 0x89, modrm_disp32(src, base)] + b_u32(off)
+
+// ── Linux syscalls (direct — no libc!) ───────────────────────
+
+fn sys_write fd:int buf_reg:int len_reg:int -> [int]
+    mov_r64_imm32(RAX, 1) + mov_r64_imm32(RDI, fd) + mov_r64_r64(RSI, buf_reg) + mov_r64_r64(RDX, len_reg) + syscall_op()
+
+fn sys_exit code_reg:int -> [int]
+    mov_r64_imm32(RAX, 60) + mov_r64_r64(RDI, code_reg) + syscall_op()
+
+fn sys_exit_imm code:int -> [int]
+    mov_r64_imm32(RAX, 60) + mov_r64_imm32(RDI, code) + syscall_op()
+
+fn sys_brk reg:int -> [int]
+    mov_r64_imm32(RAX, 12) + mov_r64_r64(RDI, reg) + syscall_op()

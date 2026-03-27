@@ -1,0 +1,9 @@
+// Fibonacci sequence using recursion
+fn fib n:int -> int
+    if n <= 1 then n else fib(n-1) + fib(n-2)
+
+fn main
+    let mut i = 0
+    while i <= 10
+        println(fib(i))
+        i += 1

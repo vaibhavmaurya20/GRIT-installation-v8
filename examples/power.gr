@@ -1,0 +1,16 @@
+// Integer power function
+fn power base:int exp:int -> int
+    if exp == 0
+        return 1
+    let mut result = 1
+    let mut e = exp
+    while e > 0
+        result = result * base
+        e -= 1
+    result
+
+fn main
+    println(power(2, 0))
+    println(power(2, 10))
+    println(power(3, 5))
+    println(power(10, 6))

@@ -1,0 +1,1064 @@
+// ============================================================
+//  GRIT v8 Parser — written in GRIT
+//  Input:  token array from lexer  (each token = [kind,val,line])
+//  Output: AST as nested arrays
+//
+//  AST node format: ["KIND", field1, field2, ...]
+//  Examples:
+//    ["FN", name, params_arr, body_arr]
+//    ["LET", name, mutable_str, init_expr]
+//    ["CALL", callee_expr, args_arr]
+//    ["BIN", op, left, right]
+//    ["INT", "42"]   ["STR", "hello"]   ["VAR", "x"]
+//    ["IF", cond, then_block, else_block_or_""]
+//    ["WHILE", cond, body]
+//    ["FOR", var, iter, body]
+//    ["MATCH", scrutinee, arms_arr]
+//    ["STRUCT_LIT", name, fields_arr]   fields_arr = [["f","expr"]...]
+//    ["FIELD", obj, field_name]
+//    ["INDEX", obj, idx]
+//    ["ASSIGN", target, op, value]
+//    ["RETURN", expr_or_""]
+//    ["BLOCK", stmts_arr]
+//    ["MODULE", items_arr]
+// ============================================================
+
+// ── Token accessors ──────────────────────────────────────────
+fn tok_kind t:[str] -> str => t[0]
+fn tok_val  t:[str] -> str => t[1]
+
+// ── Parser state (passed by value, returned updated) ─────────
+struct ParseState
+    tokens: [[str]]
+    pos: int
+
+fn ps_cur s:ParseState -> [str]
+    if s.pos < len(s.tokens)
+        s.tokens[s.pos]
+    else
+        ["EOF", "", "0"]
+
+fn ps_peek s:ParseState n:int -> [str]
+    let idx = s.pos + n
+    if idx < len(s.tokens)
+        s.tokens[idx]
+    else
+        ["EOF", "", "0"]
+
+fn ps_adv s:ParseState -> ParseState
+    if s.pos < len(s.tokens)
+        ParseState { tokens: s.tokens, pos: s.pos + 1 }
+    else
+        s
+
+fn ps_eat s:ParseState kind:str -> ParseState
+    if tok_kind(ps_cur(s)) == kind
+        ps_adv(s)
+    else
+        s
+
+fn ps_eat_kw s:ParseState kw:str -> ParseState
+    let t = ps_cur(s)
+    if tok_kind(t) == "KW" && tok_val(t) == kw
+        ps_adv(s)
+    else
+        s
+
+fn ps_skip_nl s:ParseState -> ParseState
+    let mut st = s
+    let mut going = true
+    while going
+        let k = tok_kind(ps_cur(st))
+        if k == "NEWLINE"
+            st = ps_adv(st)
+        else
+            going = false
+    st
+
+fn is_kw_val s:ParseState kw:str -> bool
+    let t = ps_cur(s)
+    tok_kind(t) == "KW" && tok_val(t) == kw
+
+// ── Result type: [updated_state, ast_node] ───────────────────
+fn result s:ParseState node:[str] -> [[str]]
+    // Encode state into a special wrapper node
+    // Returns [state_encoded_node, actual_node]
+    // state_encoded_node = ["STATE", pos_str]
+    [["STATE", to_string(s.pos)], node]
+
+fn res_state r:[[str]] tokens:[[str]] -> ParseState
+    let sp = r[0]
+    let pos_str = sp[1]
+    let p = match parse_int(pos_str)
+        Ok(n) => n
+        Err(_) => 0
+    ParseState { tokens: tokens, pos: p }
+
+fn res_node r:[[str]] -> [str]
+    r[1]
+
+// ── Skip type annotation ─────────────────────────────────────
+fn skip_type s:ParseState -> ParseState
+    let mut st = s
+    let mut depth = 0
+    let mut saw_first = false
+    let mut going = true
+    while going
+        let k = tok_kind(ps_cur(st))
+        if k == "LBRACKET" || k == "LPAREN"
+            depth += 1
+            saw_first = true
+            st = ps_adv(st)
+        else if k == "RBRACKET" || k == "RPAREN"
+            if depth == 0
+                going = false
+            else
+                depth -= 1
+                st = ps_adv(st)
+        else if k == "NEWLINE" || k == "EOF" || k == "ASSIGN" || k == "FATARROW" || k == "ARROW" || k == "INDENT" || k == "DEDENT" || k == "COMMA"
+            if depth == 0
+                going = false
+            else
+                st = ps_adv(st)
+        else if k == "IDENT" && depth == 0 && saw_first
+            going = false
+        else
+            saw_first = true
+            st = ps_adv(st)
+    st
+
+// ── Parse params: returns [state, params_array] ──────────────
+fn parse_params s:ParseState -> [[str]]
+    let mut st = s
+    let mut params = []
+    let has_parens = tok_kind(ps_cur(st)) == "LPAREN"
+    if has_parens
+        st = ps_adv(st)
+    
+    let mut going = true
+    while going
+        let k = tok_kind(ps_cur(st))
+        if k == "RPAREN" && has_parens
+            st = ps_adv(st)
+            going = false
+        else if (k == "ARROW" || k == "FATARROW" || k == "INDENT" || k == "EOF") && !has_parens
+            going = false
+        else if (k == "NEWLINE" || k == "DEDENT") && !has_parens
+            going = false
+        else if k == "COMMA"
+            st = ps_adv(st)
+        else
+            // mut?
+            let is_mut = is_kw_val(st, "mut")
+            if is_mut
+                st = ps_adv(st)
+            
+            // self param
+            if is_kw_val(st, "self")
+                params = push(params, "self")
+                st = ps_adv(st)
+                if tok_kind(ps_cur(st)) == "COLON"
+                    st = ps_adv(st)
+                    st = skip_type(st)
+            else
+                let t = ps_cur(st)
+                let k2 = tok_kind(t)
+                if k2 == "IDENT" || k2 == "KW"
+                    let pname = tok_val(t)
+                    st = ps_adv(st)
+                    if tok_kind(ps_cur(st)) == "COLON"
+                        st = ps_adv(st)
+                        st = skip_type(st)
+                    params = push(params, pname)
+                else
+                    going = false
+    
+    [["STATE", to_string(st.pos)], params]
+
+// ── Parse block ───────────────────────────────────────────────
+fn parse_block s:ParseState -> [[str]]
+    let mut st = ps_skip_nl(s)
+    let mut stmts = []
+    if tok_kind(ps_cur(st)) != "INDENT"
+        // single inline stmt
+        let r = parse_stmt(st)
+        st = res_state(r, st.tokens)
+        let node = res_node(r)
+        stmts = push(stmts, node)
+        let block = append(["BLOCK"], stmts)
+        return [["STATE", to_string(st.pos)], block]
+    
+    st = ps_adv(st) // eat INDENT
+    
+    let mut going = true
+    while going
+        st = ps_skip_nl(st)
+        let k = tok_kind(ps_cur(st))
+        if k == "DEDENT" || k == "EOF"
+            if k == "DEDENT"
+                st = ps_adv(st)
+            going = false
+        else if tok_kind(ps_cur(st)) == "IDENT" && tok_val(ps_cur(st)) == "@"
+            // skip @requires/@ensures
+            while tok_kind(ps_cur(st)) != "NEWLINE" && tok_kind(ps_cur(st)) != "EOF"
+                st = ps_adv(st)
+        else
+            let r = parse_stmt(st)
+            st = res_state(r, st.tokens)
+            let node = res_node(r)
+            stmts = push(stmts, node)
+    
+    let block = append(["BLOCK"], stmts)
+    [["STATE", to_string(st.pos)], block]
+
+// ── Parse statement ───────────────────────────────────────────
+fn parse_stmt s:ParseState -> [[str]]
+    let mut st = s
+    let t = ps_cur(st)
+    let k = tok_kind(t)
+    let v = tok_val(t)
+    
+    if k == "KW" && v == "let"
+        st = ps_adv(st)
+        let is_mut = is_kw_val(st, "mut")
+        if is_mut
+            st = ps_adv(st)
+        let name = tok_val(ps_cur(st))
+        st = ps_adv(st)
+        // skip type annotation
+        if tok_kind(ps_cur(st)) == "COLON"
+            st = ps_adv(st)
+            st = skip_type(st)
+        let mut init = ["UNIT"]
+        if tok_kind(ps_cur(st)) == "ASSIGN"
+            st = ps_adv(st)
+            let r = parse_expr(st, 0)
+            st = res_state(r, st.tokens)
+            init = res_node(r)
+        st = ps_eat(st, "NEWLINE")
+        let node = ["LET", name, if is_mut then "true" else "false", init]
+        return [["STATE", to_string(st.pos)], node]
+    
+    if k == "KW" && v == "return"
+        st = ps_adv(st)
+        let ek = tok_kind(ps_cur(st))
+        if ek == "NEWLINE" || ek == "EOF" || ek == "DEDENT"
+            st = ps_eat(st, "NEWLINE")
+            return [["STATE", to_string(st.pos)], ["RETURN", "UNIT"]]
+        let r = parse_expr(st, 0)
+        st = res_state(r, st.tokens)
+        let val = res_node(r)
+        st = ps_eat(st, "NEWLINE")
+        return [["STATE", to_string(st.pos)], ["RETURN", val]]
+    
+    if k == "KW" && v == "break"
+        st = ps_adv(st)
+        st = ps_eat(st, "NEWLINE")
+        return [["STATE", to_string(st.pos)], ["BREAK"]]
+    
+    if k == "KW" && v == "continue"
+        st = ps_adv(st)
+        st = ps_eat(st, "NEWLINE")
+        return [["STATE", to_string(st.pos)], ["CONTINUE"]]
+    
+    if k == "KW" && v == "fn"
+        let r = parse_fn(st)
+        return r
+    
+    if k == "KW" && v == "struct"
+        let r = parse_struct_def(st)
+        return r
+    
+    if k == "KW" && v == "enum"
+        let r = parse_enum_def(st)
+        return r
+    
+    if k == "KW" && v == "impl"
+        let r = parse_impl_def(st)
+        return r
+    
+    // expression statement
+    let r = parse_expr(st, 0)
+    st = res_state(r, st.tokens)
+    let expr = res_node(r)
+    st = ps_eat(st, "NEWLINE")
+    [["STATE", to_string(st.pos)], expr]
+
+// ── Parse fn definition ───────────────────────────────────────
+fn parse_fn s:ParseState -> [[str]]
+    let mut st = ps_adv(s) // eat fn
+    let name = tok_val(ps_cur(st))
+    st = ps_adv(st)
+    let pr = parse_params(st)
+    let params = res_node(pr)
+    st = res_state(pr, st.tokens)
+    
+    // skip return type
+    if tok_kind(ps_cur(st)) == "ARROW"
+        st = ps_adv(st)
+        st = skip_type(st)
+    
+    // inline => expr
+    if tok_kind(ps_cur(st)) == "FATARROW"
+        st = ps_adv(st)
+        let r = parse_expr(st, 0)
+        st = res_state(r, st.tokens)
+        let body_expr = res_node(r)
+        let body = ["BLOCK", body_expr]
+        let node = ["FN", name, params, body]
+        return [["STATE", to_string(st.pos)], node]
+    
+    let br = parse_block(st)
+    st = res_state(br, st.tokens)
+    let body = res_node(br)
+    let node = ["FN", name, params, body]
+    [["STATE", to_string(st.pos)], node]
+
+// ── Parse struct def ──────────────────────────────────────────
+fn parse_struct_def s:ParseState -> [[str]]
+    let mut st = ps_adv(s) // eat struct
+    let name = tok_val(ps_cur(st))
+    st = ps_adv(st)
+    st = ps_skip_nl(st)
+    let mut fields = []
+    if tok_kind(ps_cur(st)) == "INDENT"
+        st = ps_adv(st)
+        let mut going = true
+        while going
+            st = ps_skip_nl(st)
+            let k = tok_kind(ps_cur(st))
+            if k == "DEDENT" || k == "EOF"
+                if k == "DEDENT" then st = ps_adv(st)
+                going = false
+            else
+                let fname = tok_val(ps_cur(st))
+                st = ps_adv(st)
+                if tok_kind(ps_cur(st)) == "COLON"
+                    st = ps_adv(st)
+                    st = skip_type(st)
+                fields = push(fields, fname)
+                st = ps_eat(st, "NEWLINE")
+    let node = ["STRUCT_DEF", name, fields]
+    [["STATE", to_string(st.pos)], node]
+
+// ── Parse enum def ────────────────────────────────────────────
+fn parse_enum_def s:ParseState -> [[str]]
+    let mut st = ps_adv(s) // eat enum
+    let name = tok_val(ps_cur(st))
+    st = ps_adv(st)
+    st = ps_skip_nl(st)
+    let mut variants = []
+    if tok_kind(ps_cur(st)) == "INDENT"
+        st = ps_adv(st)
+        let mut going = true
+        while going
+            st = ps_skip_nl(st)
+            let k = tok_kind(ps_cur(st))
+            if k == "DEDENT" || k == "EOF"
+                if k == "DEDENT" then st = ps_adv(st)
+                going = false
+            else
+                let vname = tok_val(ps_cur(st))
+                st = ps_adv(st)
+                let mut vfields = []
+                if tok_kind(ps_cur(st)) == "LBRACE"
+                    st = ps_adv(st)
+                    let mut vg = true
+                    while vg
+                        let vk = tok_kind(ps_cur(st))
+                        if vk == "RBRACE" || vk == "EOF"
+                            if vk == "RBRACE" then st = ps_adv(st)
+                            vg = false
+                        else if vk == "COMMA" || vk == "NEWLINE"
+                            st = ps_adv(st)
+                        else
+                            let vfname = tok_val(ps_cur(st))
+                            st = ps_adv(st)
+                            if tok_kind(ps_cur(st)) == "COLON"
+                                st = ps_adv(st)
+                                st = skip_type(st)
+                            vfields = push(vfields, vfname)
+                let vnode = push(["VARIANT", vname], vfields)
+                variants = push(variants, vnode)
+                st = ps_eat(st, "NEWLINE")
+    let node = ["ENUM_DEF", name, variants]
+    [["STATE", to_string(st.pos)], node]
+
+// ── Parse impl def ────────────────────────────────────────────
+fn parse_impl_def s:ParseState -> [[str]]
+    let mut st = ps_adv(s) // eat impl
+    let type_name = tok_val(ps_cur(st))
+    st = ps_adv(st)
+    st = ps_skip_nl(st)
+    let mut methods = []
+    if tok_kind(ps_cur(st)) == "INDENT"
+        st = ps_adv(st)
+        let mut going = true
+        while going
+            st = ps_skip_nl(st)
+            let k = tok_kind(ps_cur(st))
+            if k == "DEDENT" || k == "EOF"
+                if k == "DEDENT" then st = ps_adv(st)
+                going = false
+            else if k == "KW" && tok_val(ps_cur(st)) == "fn"
+                let r = parse_fn(st)
+                st = res_state(r, st.tokens)
+                let mnode = res_node(r)
+                methods = push(methods, mnode)
+            else if k == "KW" && tok_val(ps_cur(st)) == "pub"
+                st = ps_adv(st)
+            else
+                // skip unknown
+                st = ps_adv(st)
+    let node = ["IMPL_DEF", type_name, methods]
+    [["STATE", to_string(st.pos)], node]
+
+// ── Parse expression (Pratt) ──────────────────────────────────
+fn infix_bp op:str -> int
+    match op
+        "||"        => 4
+        "&&"        => 6
+        "=="        => 14
+        "!="        => 14
+        "<"         => 16
+        "<="        => 16
+        ">"         => 16
+        ">="        => 16
+        "+"         => 20
+        "-"         => 20
+        "*"         => 22
+        "/"         => 22
+        "%"         => 22
+        ".."        => 2
+        "..="       => 2
+        _           => 0
+
+fn is_infix_tok t:[str] -> bool
+    let k = tok_kind(t)
+    let v = tok_val(t)
+    if k == "PLUS" || k == "MINUS" || k == "STAR" || k == "SLASH" || k == "PERCENT"
+        true
+    else if k == "EQ" || k == "NE" || k == "LT" || k == "LE" || k == "GT" || k == "GE"
+        true
+    else if k == "AND" || k == "OR"
+        true
+    else if k == "DOTDOT" || k == "DOTDOTEQ"
+        true
+    else if k == "STARSTAR"
+        true
+    else
+        false
+
+fn is_assign_tok t:[str] -> bool
+    let k = tok_kind(t)
+    k == "ASSIGN" || k == "PLUSEQ" || k == "MINUSEQ" || k == "STAREQ" || k == "SLASHEQ" || k == "PERCENTEQ"
+
+fn assign_op_str t:[str] -> str
+    match tok_kind(t)
+        "ASSIGN"    => "="
+        "PLUSEQ"    => "+="
+        "MINUSEQ"   => "-="
+        "STAREQ"    => "*="
+        "SLASHEQ"   => "/="
+        "PERCENTEQ" => "%="
+        _           => "="
+
+fn tok_op_str t:[str] -> str
+    match tok_kind(t)
+        "PLUS"     => "+"
+        "MINUS"    => "-"
+        "STAR"     => "*"
+        "SLASH"    => "/"
+        "PERCENT"  => "%"
+        "STARSTAR" => "**"
+        "EQ"       => "=="
+        "NE"       => "!="
+        "LT"       => "<"
+        "LE"       => "<="
+        "GT"       => ">"
+        "GE"       => ">="
+        "AND"      => "&&"
+        "OR"       => "||"
+        "DOTDOT"   => ".."
+        "DOTDOTEQ" => "..="
+        _          => "?"
+
+fn parse_expr s:ParseState min_bp:int -> [[str]]
+    let mut st = s
+    let pr = parse_prefix(st)
+    st = res_state(pr, st.tokens)
+    let mut lhs = res_node(pr)
+    
+    // postfix: call, field, index, method
+    let mut doing_post = true
+    while doing_post
+        let k = tok_kind(ps_cur(st))
+        if k == "LPAREN"
+            st = ps_adv(st)
+            let ar = parse_args(st)
+            st = res_state(ar, st.tokens)
+            let args = res_node(ar)
+            st = ps_eat(st, "RPAREN")
+            lhs = ["CALL", lhs, args]
+        else if k == "DOT"
+            st = ps_adv(st)
+            let field = tok_val(ps_cur(st))
+            st = ps_adv(st)
+            if tok_kind(ps_cur(st)) == "LPAREN"
+                st = ps_adv(st)
+                let ar = parse_args(st)
+                st = res_state(ar, st.tokens)
+                let args = res_node(ar)
+                st = ps_eat(st, "RPAREN")
+                lhs = ["METHOD", lhs, field, args]
+            else
+                lhs = ["FIELD", lhs, field]
+        else if k == "LBRACKET"
+            st = ps_adv(st)
+            let ir = parse_expr(st, 0)
+            st = res_state(ir, st.tokens)
+            let idx = res_node(ir)
+            st = ps_eat(st, "RBRACKET")
+            lhs = ["INDEX", lhs, idx]
+        else
+            doing_post = false
+    
+    // assignment?
+    if min_bp <= 1 && is_assign_tok(ps_cur(st))
+        let op = assign_op_str(ps_cur(st))
+        st = ps_adv(st)
+        let rr = parse_expr(st, 1)
+        st = res_state(rr, st.tokens)
+        let rhs = res_node(rr)
+        lhs = ["ASSIGN", lhs, op, rhs]
+        return [["STATE", to_string(st.pos)], lhs]
+    
+    // infix
+    let mut going = true
+    while going
+        let ct = ps_cur(st)
+        if !is_infix_tok(ct)
+            going = false
+        else
+            let op = tok_op_str(ct)
+            let lbp = if op == "**" then 25 else infix_bp(op)
+            if lbp < min_bp
+                going = false
+            else
+                st = ps_adv(st)
+                let rbp = if op == "**" then 24 else lbp + 1
+                let rr = parse_expr(st, rbp)
+                st = res_state(rr, st.tokens)
+                let rhs = res_node(rr)
+                lhs = ["BIN", op, lhs, rhs]
+        
+        // re-check postfix after each infix (for chained calls)
+        if going
+            let pk = tok_kind(ps_cur(st))
+            if pk == "LPAREN"
+                st = ps_adv(st)
+                let ar = parse_args(st)
+                st = res_state(ar, st.tokens)
+                let args = res_node(ar)
+                st = ps_eat(st, "RPAREN")
+                lhs = ["CALL", lhs, args]
+            else if pk == "DOT"
+                st = ps_adv(st)
+                let field = tok_val(ps_cur(st))
+                st = ps_adv(st)
+                if tok_kind(ps_cur(st)) == "LPAREN"
+                    st = ps_adv(st)
+                    let ar = parse_args(st)
+                    st = res_state(ar, st.tokens)
+                    let args = res_node(ar)
+                    st = ps_eat(st, "RPAREN")
+                    lhs = ["METHOD", lhs, field, args]
+                else
+                    lhs = ["FIELD", lhs, field]
+    
+    [["STATE", to_string(st.pos)], lhs]
+
+fn parse_args s:ParseState -> [[str]]
+    let mut st = s
+    let mut args = []
+    let mut going = true
+    while going
+        let k = tok_kind(ps_cur(st))
+        if k == "RPAREN" || k == "EOF"
+            going = false
+        else
+            // skip label:
+            if tok_kind(ps_cur(st)) == "IDENT" && tok_kind(ps_peek(st, 1)) == "COLON"
+                st = ps_adv(st)
+                st = ps_adv(st)
+            let r = parse_expr(st, 0)
+            st = res_state(r, st.tokens)
+            let arg = res_node(r)
+            args = push(args, arg)
+            if tok_kind(ps_cur(st)) == "COMMA"
+                st = ps_adv(st)
+            st = ps_skip_nl(st)
+    let node = append(["ARGS"], args)
+    [["STATE", to_string(st.pos)], node]
+
+fn parse_prefix s:ParseState -> [[str]]
+    let mut st = s
+    let t = ps_cur(st)
+    let k = tok_kind(t)
+    let v = tok_val(t)
+    
+    if k == "INT"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["INT", v]]
+    
+    if k == "FLOAT"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["FLOAT", v]]
+    
+    if k == "STR"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["STR", v]]
+    
+    if k == "KW" && v == "true"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["BOOL", "true"]]
+    
+    if k == "KW" && v == "false"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["BOOL", "false"]]
+    
+    if k == "MINUS"
+        st = ps_adv(st)
+        let r = parse_expr(st, 24)
+        st = res_state(r, st.tokens)
+        let inner = res_node(r)
+        return [["STATE", to_string(st.pos)], ["UNARY", "-", inner]]
+    
+    if k == "BANG"
+        st = ps_adv(st)
+        let r = parse_expr(st, 24)
+        st = res_state(r, st.tokens)
+        let inner = res_node(r)
+        return [["STATE", to_string(st.pos)], ["UNARY", "!", inner]]
+    
+    if k == "LPAREN"
+        st = ps_adv(st)
+        if tok_kind(ps_cur(st)) == "RPAREN"
+            st = ps_adv(st)
+            return [["STATE", to_string(st.pos)], ["UNIT"]]
+        let r = parse_expr(st, 0)
+        st = res_state(r, st.tokens)
+        let inner = res_node(r)
+        if tok_kind(ps_cur(st)) == "COMMA"
+            // tuple
+            let mut elems = [inner]
+            let mut tg = true
+            while tg
+                if tok_kind(ps_cur(st)) != "COMMA"
+                    tg = false
+                else
+                    st = ps_adv(st)
+                    if tok_kind(ps_cur(st)) == "RPAREN"
+                        tg = false
+                    else
+                        let er = parse_expr(st, 0)
+                        st = res_state(er, st.tokens)
+                        elems = push(elems, res_node(er))
+            st = ps_eat(st, "RPAREN")
+            let node = append(["TUPLE"], elems)
+            return [["STATE", to_string(st.pos)], node]
+        st = ps_eat(st, "RPAREN")
+        return [["STATE", to_string(st.pos)], inner]
+    
+    if k == "LBRACKET"
+        st = ps_adv(st)
+        let mut elems = []
+        let mut ag = true
+        while ag
+            let ak = tok_kind(ps_cur(st))
+            if ak == "RBRACKET" || ak == "EOF"
+                ag = false
+            else
+                let er = parse_expr(st, 0)
+                st = res_state(er, st.tokens)
+                elems = push(elems, res_node(er))
+                st = ps_eat(st, "COMMA")
+                st = ps_skip_nl(st)
+        st = ps_eat(st, "RBRACKET")
+        let node = append(["ARRAY"], elems)
+        return [["STATE", to_string(st.pos)], node]
+    
+    if k == "KW" && v == "if"
+        let r = parse_if_expr(st)
+        return r
+    
+    if k == "KW" && v == "while"
+        st = ps_adv(st)
+        let cr = parse_expr(st, 0)
+        st = res_state(cr, st.tokens)
+        let cond = res_node(cr)
+        let br = parse_block(st)
+        st = res_state(br, st.tokens)
+        let body = res_node(br)
+        return [["STATE", to_string(st.pos)], ["WHILE", cond, body]]
+    
+    if k == "KW" && v == "for"
+        st = ps_adv(st)
+        let var = tok_val(ps_cur(st))
+        st = ps_adv(st)
+        st = ps_eat_kw(st, "in")
+        let ir = parse_expr(st, 0)
+        st = res_state(ir, st.tokens)
+        let iter = res_node(ir)
+        let br = parse_block(st)
+        st = res_state(br, st.tokens)
+        let body = res_node(br)
+        return [["STATE", to_string(st.pos)], ["FOR", var, iter, body]]
+    
+    if k == "KW" && v == "match"
+        let r = parse_match_expr(st)
+        return r
+    
+    if k == "KW" && v == "return"
+        st = ps_adv(st)
+        let ek = tok_kind(ps_cur(st))
+        if ek == "NEWLINE" || ek == "EOF" || ek == "DEDENT"
+            return [["STATE", to_string(st.pos)], ["RETURN", ["UNIT"]]]
+        let r = parse_expr(st, 0)
+        st = res_state(r, st.tokens)
+        let val = res_node(r)
+        return [["STATE", to_string(st.pos)], ["RETURN", val]]
+    
+    if k == "KW" && v == "fn"
+        // closure
+        st = ps_adv(st)
+        let pr = parse_params(st)
+        let params = res_node(pr)
+        st = res_state(pr, st.tokens)
+        if tok_kind(ps_cur(st)) == "ARROW"
+            st = ps_adv(st)
+            st = skip_type(st)
+        if tok_kind(ps_cur(st)) == "FATARROW"
+            st = ps_adv(st)
+            let r = parse_expr(st, 0)
+            st = res_state(r, st.tokens)
+            let body = res_node(r)
+            return [["STATE", to_string(st.pos)], ["CLOSURE", params, body]]
+        let br = parse_block(st)
+        st = res_state(br, st.tokens)
+        let body = res_node(br)
+        return [["STATE", to_string(st.pos)], ["CLOSURE", params, body]]
+    
+    // identifier / path / struct literal
+    if k == "IDENT" || (k == "KW" && v == "self")
+        let mut segs = [if k == "KW" then "self" else v]
+        st = ps_adv(st)
+        while tok_kind(ps_cur(st)) == "COLONCOLON"
+            st = ps_adv(st)
+            segs = push(segs, tok_val(ps_cur(st)))
+            st = ps_adv(st)
+        
+        // skip generic args [T]
+        if tok_kind(ps_cur(st)) == "LBRACKET"
+            let save = st.pos
+            st = ps_adv(st)
+            let mut depth2 = 1
+            let mut ok2 = true
+            while depth2 > 0 && tok_kind(ps_cur(st)) != "EOF"
+                let gk = tok_kind(ps_cur(st))
+                if gk == "LBRACKET" then depth2 += 1
+                else if gk == "RBRACKET" then depth2 -= 1
+                else if gk == "INT" || gk == "FLOAT" || gk == "STR" || gk == "LPAREN" || gk == "LBRACE"
+                    ok2 = false
+                st = ps_adv(st)
+            if !ok2
+                st = ParseState { tokens: st.tokens, pos: save }
+        
+        // struct literal: Path { field: val }
+        if tok_kind(ps_cur(st)) == "LBRACE"
+            st = ps_adv(st)
+            let mut fields = []
+            let mut sg = true
+            while sg
+                st = ps_skip_nl(st)
+                let fk = tok_kind(ps_cur(st))
+                if fk == "RBRACE" || fk == "EOF"
+                    if fk == "RBRACE" then st = ps_adv(st)
+                    sg = false
+                else if fk == "DOTDOT"
+                    st = ps_adv(st)
+                    st = parse_expr(st, 0)
+                    st = res_state([["STATE", to_string(st.pos)], ["UNIT"]], st.tokens)
+                    st = ps_eat(st, "COMMA")
+                else
+                    let fname = tok_val(ps_cur(st))
+                    st = ps_adv(st)
+                    let fval = if tok_kind(ps_cur(st)) == "COLON"
+                        st = ps_adv(st)
+                        let fr = parse_expr(st, 0)
+                        st = res_state(fr, st.tokens)
+                        res_node(fr)
+                    else
+                        ["VAR", fname]
+                    fields = push(fields, ["FIELD_INIT", fname, fval])
+                    st = ps_eat(st, "COMMA")
+                    st = ps_skip_nl(st)
+            let sname = join(segs, "::")
+            let node = push(["STRUCT_LIT", sname], fields)
+            return [["STATE", to_string(st.pos)], node]
+        
+        let sname = join(segs, "::")
+        return [["STATE", to_string(st.pos)], ["VAR", sname]]
+    
+    // fallback: skip token
+    st = ps_adv(st)
+    [["STATE", to_string(st.pos)], ["UNIT"]]
+
+fn parse_if_expr s:ParseState -> [[str]]
+    let mut st = ps_adv(s) // eat if
+    let cr = parse_expr(st, 0)
+    st = res_state(cr, st.tokens)
+    let cond = res_node(cr)
+    st = ps_eat_kw(st, "then")
+    
+    // inline if-then-else?
+    let tk = tok_kind(ps_cur(st))
+    if tk != "INDENT" && tk != "NEWLINE"
+        let tr = parse_expr(st, 0)
+        st = res_state(tr, st.tokens)
+        let then_e = res_node(tr)
+        let else_e = if is_kw_val(st, "else")
+            st = ps_adv(st)
+            let er = parse_expr(st, 0)
+            st = res_state(er, st.tokens)
+            res_node(er)
+        else
+            ["UNIT"]
+        return [["STATE", to_string(st.pos)], ["IF", cond, then_e, else_e]]
+    
+    let tbr = parse_block(st)
+    st = res_state(tbr, st.tokens)
+    let then_b = res_node(tbr)
+    st = ps_skip_nl(st)
+    let else_b = if is_kw_val(st, "else")
+        st = ps_adv(st)
+        st = ps_skip_nl(st)
+        if is_kw_val(st, "if")
+            let er = parse_if_expr(st)
+            st = res_state(er, st.tokens)
+            res_node(er)
+        else
+            let ebr = parse_block(st)
+            st = res_state(ebr, st.tokens)
+            res_node(ebr)
+    else
+        ["UNIT"]
+    [["STATE", to_string(st.pos)], ["IF", cond, then_b, else_b]]
+
+fn parse_match_expr s:ParseState -> [[str]]
+    let mut st = ps_adv(s) // eat match
+    let sr = parse_expr(st, 0)
+    st = res_state(sr, st.tokens)
+    let scrutinee = res_node(sr)
+    st = ps_skip_nl(st)
+    st = ps_eat(st, "INDENT")
+    let mut arms = []
+    let mut going = true
+    while going
+        st = ps_skip_nl(st)
+        let k = tok_kind(ps_cur(st))
+        if k == "DEDENT" || k == "EOF"
+            if k == "DEDENT" then st = ps_adv(st)
+            going = false
+        else
+            let pr = parse_pat(st)
+            st = res_state(pr, st.tokens)
+            let pat = res_node(pr)
+            // guard
+            let guard = if is_kw_val(st, "if")
+                st = ps_adv(st)
+                let gr = parse_expr(st, 0)
+                st = res_state(gr, st.tokens)
+                res_node(gr)
+            else
+                ["UNIT"]
+            st = ps_eat(st, "FATARROW")
+            let body_k = tok_kind(ps_cur(st))
+            let body = if body_k == "INDENT" || body_k == "NEWLINE"
+                let br = parse_block(st)
+                st = res_state(br, st.tokens)
+                res_node(br)
+            else
+                let er = parse_expr(st, 0)
+                st = res_state(er, st.tokens)
+                st = ps_eat(st, "NEWLINE")
+                res_node(er)
+            arms = push(arms, ["ARM", pat, guard, body])
+    let node = push(["MATCH", scrutinee], arms)
+    [["STATE", to_string(st.pos)], node]
+
+fn parse_pat s:ParseState -> [[str]]
+    let mut st = s
+    let t = ps_cur(st)
+    let k = tok_kind(t)
+    let v = tok_val(t)
+    
+    if k == "IDENT" && v == "_"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["PAT_WILD"]]
+    
+    if k == "INT"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["PAT_INT", v]]
+    
+    if k == "FLOAT"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["PAT_FLOAT", v]]
+    
+    if k == "STR"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["PAT_STR", v]]
+    
+    if k == "KW" && v == "true"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["PAT_BOOL", "true"]]
+    
+    if k == "KW" && v == "false"
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["PAT_BOOL", "false"]]
+    
+    if k == "MINUS"
+        st = ps_adv(st)
+        let nv = tok_val(ps_cur(st))
+        st = ps_adv(st)
+        return [["STATE", to_string(st.pos)], ["PAT_INT", "-" + nv]]
+    
+    if k == "LPAREN"
+        st = ps_adv(st)
+        if tok_kind(ps_cur(st)) == "RPAREN"
+            st = ps_adv(st)
+            return [["STATE", to_string(st.pos)], ["PAT_UNIT"]]
+        let mut pats = []
+        let mut pg = true
+        while pg
+            let pr = parse_pat(st)
+            st = res_state(pr, st.tokens)
+            pats = push(pats, res_node(pr))
+            if tok_kind(ps_cur(st)) == "COMMA"
+                st = ps_adv(st)
+            else
+                pg = false
+        st = ps_eat(st, "RPAREN")
+        let node = push(["PAT_TUPLE"], pats)
+        return [["STATE", to_string(st.pos)], node]
+    
+    if k == "IDENT" || (k == "KW" && (v == "self" || v == "mut"))
+        let is_mut = v == "mut"
+        if is_mut then st = ps_adv(st)
+        let mut segs = [tok_val(ps_cur(st))]
+        st = ps_adv(st)
+        while tok_kind(ps_cur(st)) == "COLONCOLON"
+            st = ps_adv(st)
+            segs = push(segs, tok_val(ps_cur(st)))
+            st = ps_adv(st)
+        
+        let pname = join(segs, "::")
+        
+        if tok_kind(ps_cur(st)) == "LBRACE"
+            // struct pattern
+            st = ps_adv(st)
+            let mut fields = []
+            let mut rest = false
+            let mut fg = true
+            while fg
+                st = ps_skip_nl(st)
+                let fk = tok_kind(ps_cur(st))
+                if fk == "RBRACE" || fk == "EOF"
+                    if fk == "RBRACE" then st = ps_adv(st)
+                    fg = false
+                else if fk == "DOTDOT"
+                    rest = true
+                    st = ps_adv(st)
+                    fg = false
+                else
+                    let fname = tok_val(ps_cur(st))
+                    st = ps_adv(st)
+                    let subpat = if tok_kind(ps_cur(st)) == "COLON"
+                        st = ps_adv(st)
+                        let sr = parse_pat(st)
+                        st = res_state(sr, st.tokens)
+                        res_node(sr)
+                    else
+                        ["PAT_BIND", fname]
+                    fields = push(fields, ["PAT_FIELD", fname, subpat])
+                    st = ps_eat(st, "COMMA")
+                    st = ps_skip_nl(st)
+            let node = push(["PAT_STRUCT", pname, if rest then "true" else "false"], fields)
+            return [["STATE", to_string(st.pos)], node]
+        
+        if tok_kind(ps_cur(st)) == "LPAREN"
+            // enum tuple pattern
+            st = ps_adv(st)
+            let mut args = []
+            let mut ag = true
+            while ag
+                if tok_kind(ps_cur(st)) == "RPAREN" || tok_kind(ps_cur(st)) == "EOF"
+                    ag = false
+                else
+                    let ar = parse_pat(st)
+                    st = res_state(ar, st.tokens)
+                    args = push(args, res_node(ar))
+                    st = ps_eat(st, "COMMA")
+            st = ps_eat(st, "RPAREN")
+            let node = push(["PAT_ENUM", pname], args)
+            return [["STATE", to_string(st.pos)], node]
+        
+        // single segment lowercase = bind, otherwise enum variant
+        let first_char = to_string(segs[0])
+        let is_lower = first_char >= "a" && first_char <= "z" || first_char == "_"
+        if len(segs) == 1 && is_lower && !is_kw(segs[0])
+            return [["STATE", to_string(st.pos)], ["PAT_BIND", pname]]
+        return [["STATE", to_string(st.pos)], ["PAT_ENUM", pname]]
+    
+    st = ps_adv(st)
+    [["STATE", to_string(st.pos)], ["PAT_WILD"]]
+
+// ── Parse module ──────────────────────────────────────────────
+fn parse_module s:ParseState -> [str]
+    let mut st = s
+    let mut items = []
+    
+    let mut going = true
+    while going
+        st = ps_skip_nl(st)
+        let k = tok_kind(ps_cur(st))
+        let v = tok_val(ps_cur(st))
+        if k == "EOF"
+            going = false
+        else if k == "INDENT" || k == "DEDENT"
+            st = ps_adv(st)
+        else if k == "KW" && v == "pub"
+            st = ps_adv(st)
+        else if k == "KW" && v == "fn"
+            let r = parse_fn(st)
+            st = res_state(r, st.tokens)
+            items = push(items, res_node(r))
+        else if k == "KW" && v == "struct"
+            let r = parse_struct_def(st)
+            st = res_state(r, st.tokens)
+            items = push(items, res_node(r))
+        else if k == "KW" && v == "enum"
+            let r = parse_enum_def(st)
+            st = res_state(r, st.tokens)
+            items = push(items, res_node(r))
+        else if k == "KW" && v == "impl"
+            let r = parse_impl_def(st)
+            st = res_state(r, st.tokens)
+            items = push(items, res_node(r))
+        else if k == "KW" && (v == "use" || v == "mod" || v == "const" || v == "static")
+            while tok_kind(ps_cur(st)) != "NEWLINE" && tok_kind(ps_cur(st)) != "EOF"
+                st = ps_adv(st)
+        else
+            st = ps_adv(st)
+    
+    append(["MODULE"], items)

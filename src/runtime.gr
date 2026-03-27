@@ -1,0 +1,222 @@
+// ============================================================
+//  GRIT v8 Runtime — x86_64 Linux syscall subroutines
+//  No libc. No external dependencies.
+//  
+//  LABEL MAP (offsets from start of runtime):
+//    0   : grit_write(rdi=ptr, rsi=len) → stdout
+//   26   : grit_strlen(rdi=ptr) → rax=len
+//   43   : grit_itoa(rdi=n, rsi=buf) → rax=written_len
+//  200   : grit_println_i(rdi=n)
+//  250   : grit_println_s(rdi=ptr, rsi=len)
+//  320   : grit_println_b(rdi=n)
+//  380   : grit_alloc(rdi=bytes) → rax=ptr
+//  430   : grit_panic(rdi=ptr, rsi=len) → exit(1)
+// ============================================================
+
+const RT_WRITE      = 0
+const RT_STRLEN     = 26
+const RT_ITOA       = 43
+const RT_PRINTLN_I  = 200
+const RT_PRINTLN_S  = 250
+const RT_PRINTLN_B  = 320
+const RT_ALLOC      = 380
+const RT_PANIC      = 430
+
+fn build_runtime -> [int]
+    let mut r = []
+
+    // ── grit_write(rdi=ptr, rsi=len) ─────────── offset 0 (26 bytes)
+    // Move args: rdx=len, rsi=ptr, rdi=1(stdout), rax=1(write), syscall
+    r = r + [0x48, 0x89, 0xF2]                    // mov rdx, rsi
+    r = r + [0x48, 0x89, 0xFE]                    // mov rsi, rdi
+    r = r + [0x48, 0xC7, 0xC7, 0x01, 0, 0, 0]    // mov rdi, 1
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]    // mov rax, 1
+    r = r + [0x0F, 0x05]                           // syscall
+    r = r + [0xC3]                                 // ret
+    // Total: 3+3+7+7+2+1 = 23 bytes → pad to 26
+
+    while len(r) < RT_STRLEN
+        r = push(r, 0x90)
+
+    // ── grit_strlen(rdi=ptr) → rax ──────────── offset 26 (17 bytes)
+    r = r + [0x48, 0x31, 0xC0]                    // xor rax, rax
+    r = r + [0x80, 0x3C, 0x07, 0x00]              // cmp byte [rdi+rax], 0
+    r = r + [0x74, 0x05]                           // je done
+    r = r + [0x48, 0xFF, 0xC0]                     // inc rax
+    r = r + [0xEB, 0xF5]                           // jmp -11
+    r = r + [0xC3]                                 // ret
+
+    while len(r) < RT_ITOA
+        r = push(r, 0x90)
+
+    // ── grit_itoa(rdi=n, rsi=buf) → rax=len ─── offset 43
+    // Handle n==0 specially, then convert digits in reverse
+    r = r + [0x53]                                 // push rbx
+    r = r + [0x55]                                 // push rbp
+    r = r + [0x48, 0x89, 0xF5]                    // mov rbp, rsi (save buf ptr)
+    // Check n == 0
+    r = r + [0x48, 0x85, 0xFF]                    // test rdi, rdi
+    r = r + [0x75, 0x0D]                           // jnz not_zero (+13)
+    // n == 0: write "0"
+    r = r + [0xC6, 0x06, 0x30]                    // mov byte [rsi], '0'
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]    // mov rax, 1
+    r = r + [0x5D]                                 // pop rbp
+    r = r + [0x5B]                                 // pop rbx
+    r = r + [0xC3]                                 // ret
+    // not_zero: check sign
+    r = r + [0x48, 0x31, 0xC0]                    // xor rax, rax (len=0)
+    r = r + [0x48, 0x85, 0xFF]                    // test rdi, rdi
+    r = r + [0x79, 0x0C]                           // jns positive (+12)
+    // negative: write '-'
+    r = r + [0xC6, 0x06, 0x2D]                    // mov byte [rsi], '-'
+    r = r + [0x48, 0xFF, 0xC6]                     // inc rsi
+    r = r + [0x48, 0xF7, 0xDF]                    // neg rdi
+    r = r + [0x48, 0xFF, 0xC0]                   // inc rax (len++)
+    // positive: save sign_len in rbx, use stack for digit reversal
+    r = r + [0x48, 0x89, 0xC3]                    // mov rbx, rax
+    r = r + [0x48, 0x83, 0xEC, 0x20]              // sub rsp, 32
+    r = r + [0x48, 0x89, 0xE1]                    // mov rcx, rsp
+    r = r + [0x48, 0x31, 0xD2]                    // xor rdx, rdx
+    // digit_loop: rdi=remaining, rcx=digit_buf
+    r = r + [0x48, 0x89, 0xF8]                    // mov rax, rdi
+    r = r + [0x48, 0x31, 0xD2]                    // xor rdx, rdx
+    r = r + [0x48, 0xBF, 0x0A, 0, 0, 0, 0, 0, 0, 0]  // mov rdi, 10
+    r = r + [0x48, 0xF7, 0xFF]                    // idiv rdi (rax=q, rdx=r)
+    r = r + [0x48, 0x89, 0xC7]                    // mov rdi, rax
+    r = r + [0x48, 0x83, 0xC2, 0x30]              // add rdx, '0'
+    r = r + [0x88, 0x11]                           // mov [rcx], dl
+    r = r + [0x48, 0xFF, 0xC1]                    // inc rcx
+    r = r + [0x48, 0x85, 0xC0]                    // test rax, rax
+    r = r + [0x75, 0xDC]                           // jnz digit_loop (-36)
+    // Reverse: rcx=past_end, rsp=start
+    r = r + [0x48, 0x89, 0xCA]                    // mov rdx, rcx
+    r = r + [0x48, 0x89, 0xE1]                    // mov rcx, rsp
+    // rev_loop:
+    r = r + [0x48, 0x39, 0xCA]                    // cmp rdx, rcx
+    r = r + [0x76, 0x0F]                           // jbe rev_done (+15)
+    r = r + [0x48, 0xFF, 0xCA]                    // dec rdx
+    r = r + [0x8A, 0x02]                           // mov al, [rdx]
+    r = r + [0x88, 0x06]                           // mov [rsi], al
+    r = r + [0x48, 0xFF, 0xC6]                    // inc rsi
+    r = r + [0x48, 0xFF, 0xC3]                    // inc rbx
+    r = r + [0xEB, 0xEC]                           // jmp rev_loop (-20)
+    // rev_done:
+    r = r + [0x48, 0x83, 0xC4, 0x20]              // add rsp, 32
+    r = r + [0x48, 0x89, 0xD8]                    // mov rax, rbx
+    r = r + [0x5D]                                 // pop rbp
+    r = r + [0x5B]                                 // pop rbx
+    r = r + [0xC3]                                 // ret
+
+    while len(r) < RT_PRINTLN_I
+        r = push(r, 0x90)
+
+    // ── grit_println_i(rdi=n) ─────────────── offset 200
+    // Call itoa to convert to string, then write + newline
+    r = r + [0x53]                                 // push rbx
+    r = r + [0x48, 0x89, 0xFB]                    // mov rbx, rdi (save n)
+    r = r + [0x48, 0x83, 0xEC, 0x30]              // sub rsp, 48 (buf space)
+    r = r + [0x48, 0x89, 0xE6]                    // mov rsi, rsp (buf=stack)
+    r = r + [0x48, 0x89, 0xDF]                    // mov rdi, rbx
+    // call grit_itoa (relative from here)
+    // offset of itoa from here: RT_ITOA - (RT_PRINTLN_I + current_offset)
+    // We'll use a fixed relative call: itoa is at RT_ITOA=43, we're at RT_PRINTLN_I=200
+    // rel32 = 43 - (200 + current_local_offset + 5)
+    // local_offset after sub rsp = 4+3+3+3 = 13, then call at 13:
+    // rel32 = RT_ITOA - (RT_PRINTLN_I + 13 + 5) = 43 - 218 = -175 = 0xFFFFFF51
+    let itoa_rel = RT_ITOA - (RT_PRINTLN_I + 14 + 5)
+    r = r + [0xE8] + b_u32(itoa_rel)             // call grit_itoa
+    // rax = len of string at [rsp]
+    // add newline at [rsp+rax]
+    r = r + [0xC6, 0x04, 0x04, 0x0A]              // mov byte [rsp+rax], '\n'
+    r = r + [0x48, 0xFF, 0xC0]                    // inc rax (include newline)
+    // write(1, rsp, rax)
+    r = r + [0x48, 0x89, 0xC2]                    // mov rdx, rax (len)
+    r = r + [0x48, 0x89, 0xE6]                    // mov rsi, rsp (buf)
+    r = r + [0x48, 0xC7, 0xC7, 0x01, 0, 0, 0]   // mov rdi, 1
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]   // mov rax, 1
+    r = r + [0x0F, 0x05]                          // syscall
+    r = r + [0x48, 0x83, 0xC4, 0x30]             // add rsp, 48
+    r = r + [0x5B]                                // pop rbx
+    r = r + [0xC3]                                // ret
+
+    while len(r) < RT_PRINTLN_S
+        r = push(r, 0x90)
+
+    // ── grit_println_s(rdi=ptr, rsi=len) ───── offset 250
+    r = r + [0x48, 0x89, 0xF2]                   // mov rdx, rsi
+    r = r + [0x48, 0x89, 0xFE]                   // mov rsi, rdi
+    r = r + [0x48, 0xC7, 0xC7, 0x01, 0, 0, 0]   // mov rdi, 1
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]   // mov rax, 1
+    r = r + [0x0F, 0x05]                          // syscall write
+    r = r + [0x48, 0x83, 0xEC, 0x10]             // sub rsp, 16
+    r = r + [0xC6, 0x04, 0x24, 0x0A]             // mov byte [rsp], '\n'
+    r = r + [0x48, 0x89, 0xE6]                   // mov rsi, rsp
+    r = r + [0x48, 0xC7, 0xC7, 0x01, 0, 0, 0]   // mov rdi, 1
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]   // mov rax, 1
+    r = r + [0x48, 0xC7, 0xC2, 0x01, 0, 0, 0]   // mov rdx, 1
+    r = r + [0x0F, 0x05]                          // syscall
+    r = r + [0x48, 0x83, 0xC4, 0x10]             // add rsp, 16
+    r = r + [0xC3]                                // ret
+
+    while len(r) < RT_PRINTLN_B
+        r = push(r, 0x90)
+
+    // ── grit_println_b(rdi=n) ─────────────── offset 320
+    r = r + [0x48, 0x85, 0xFF]                   // test rdi, rdi
+    r = r + [0x74, 0x31]                          // je false_branch (+49)
+    // true: "true\n"
+    r = r + [0x48, 0x83, 0xEC, 0x10]
+    r = r + [0x48, 0xB8, 0x74, 0x72, 0x75, 0x65, 0x0A, 0, 0, 0]
+    r = r + [0x48, 0x89, 0x04, 0x24]
+    r = r + [0x48, 0x89, 0xE6]
+    r = r + [0x48, 0xC7, 0xC7, 0x01, 0, 0, 0]
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]
+    r = r + [0x48, 0xC7, 0xC2, 0x05, 0, 0, 0]
+    r = r + [0x0F, 0x05]
+    r = r + [0x48, 0x83, 0xC4, 0x10]
+    r = r + [0xC3]
+    // false: "false\n"
+    r = r + [0x48, 0x83, 0xEC, 0x10]
+    r = r + [0x48, 0xB8, 0x66, 0x61, 0x6C, 0x73, 0x65, 0x0A, 0, 0]
+    r = r + [0x48, 0x89, 0x04, 0x24]
+    r = r + [0x48, 0x89, 0xE6]
+    r = r + [0x48, 0xC7, 0xC7, 0x01, 0, 0, 0]
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]
+    r = r + [0x48, 0xC7, 0xC2, 0x06, 0, 0, 0]
+    r = r + [0x0F, 0x05]
+    r = r + [0x48, 0x83, 0xC4, 0x10]
+    r = r + [0xC3]
+
+    while len(r) < RT_ALLOC
+        r = push(r, 0x90)
+
+    // ── grit_alloc(rdi=bytes) → rax=ptr ──── offset 380
+    // bump allocator using brk syscall
+    r = r + [0x53]                                // push rbx
+    r = r + [0x48, 0x89, 0xFB]                   // mov rbx, rdi
+    r = r + [0x48, 0x31, 0xFF]                   // xor rdi, rdi
+    r = r + [0x48, 0xC7, 0xC0, 0x0C, 0, 0, 0]  // mov rax, 12 (brk)
+    r = r + [0x0F, 0x05]                          // syscall → rax=cur brk
+    r = r + [0x48, 0x89, 0xC1]                   // mov rcx, rax (old brk=ptr)
+    r = r + [0x48, 0x01, 0xD8]                   // add rax, rbx
+    r = r + [0x48, 0x89, 0xC7]                   // mov rdi, rax
+    r = r + [0x48, 0xC7, 0xC0, 0x0C, 0, 0, 0]  // mov rax, 12
+    r = r + [0x0F, 0x05]                          // syscall
+    r = r + [0x48, 0x89, 0xC8]                   // mov rax, rcx (return old brk)
+    r = r + [0x5B]                                // pop rbx
+    r = r + [0xC3]                                // ret
+
+    while len(r) < RT_PANIC
+        r = push(r, 0x90)
+
+    // ── grit_panic(rdi=ptr, rsi=len) ──────── offset 430
+    r = r + [0x48, 0x89, 0xF2]                   // mov rdx, rsi
+    r = r + [0x48, 0x89, 0xFE]                   // mov rsi, rdi
+    r = r + [0x48, 0xC7, 0xC7, 0x02, 0, 0, 0]  // mov rdi, 2 (stderr)
+    r = r + [0x48, 0xC7, 0xC0, 0x01, 0, 0, 0]  // mov rax, 1
+    r = r + [0x0F, 0x05]                          // syscall
+    r = r + [0x48, 0xC7, 0xC7, 0x01, 0, 0, 0]  // mov rdi, 1
+    r = r + [0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0]  // mov rax, 60
+    r = r + [0x0F, 0x05]                          // syscall
+
+    r

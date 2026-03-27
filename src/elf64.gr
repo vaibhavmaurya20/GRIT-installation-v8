@@ -1,0 +1,103 @@
+// GRIT v8 ELF64 Writer — produces valid Linux x86_64 ELF executable
+// No external tools. Pure GRIT byte manipulation.
+
+const ELF_BASE  = 0x400000
+const ELF_HDR   = 64
+const PHR_SIZE  = 56
+const HDR_TOTAL = 120
+
+fn elf_header entry_vaddr:int total_size:int -> [int]
+    // ELF64 header, exactly 64 bytes
+    let mut h = []
+    // e_ident: magic + class + data + version + OS/ABI + padding
+    h = h + [0x7F, 0x45, 0x4C, 0x46]  // magic: \x7FELF
+    h = h + [0x02]                      // EI_CLASS: ELFCLASS64
+    h = h + [0x01]                      // EI_DATA: ELFDATA2LSB (little-endian)
+    h = h + [0x01]                      // EI_VERSION: 1
+    h = h + [0x00]                      // EI_OSABI: ELFOSABI_NONE
+    h = h + b_zeros(8)                  // EI_ABIVERSION + padding (8 bytes)
+    // e_type: ET_EXEC (2)
+    h = h + b_u16(2)
+    // e_machine: EM_X86_64 (0x3E = 62)
+    h = h + b_u16(0x3E)
+    // e_version: 1
+    h = h + b_u32(1)
+    // e_entry: virtual entry point
+    h = h + b_u64(entry_vaddr)
+    // e_phoff: program header offset (right after ELF header = 64)
+    h = h + b_u64(ELF_HDR)
+    // e_shoff: section header offset (0 = none)
+    h = h + b_u64(0)
+    // e_flags: 0
+    h = h + b_u32(0)
+    // e_ehsize: size of this header (64)
+    h = h + b_u16(ELF_HDR)
+    // e_phentsize: size of program header entry (56)
+    h = h + b_u16(PHR_SIZE)
+    // e_phnum: number of program headers (1)
+    h = h + b_u16(1)
+    // e_shentsize: size of section header entry (64, irrelevant)
+    h = h + b_u16(64)
+    // e_shnum: number of section headers (0)
+    h = h + b_u16(0)
+    // e_shstrndx: section name string table index (0)
+    h = h + b_u16(0)
+    h
+
+fn prog_header file_size:int mem_size:int -> [int]
+    // PT_LOAD program header, exactly 56 bytes
+    let mut p = []
+    // p_type: PT_LOAD (1)
+    p = p + b_u32(1)
+    // p_flags: PF_R|PF_X (5) — readable and executable
+    p = p + b_u32(5)
+    // p_offset: file offset (0 = load from start of file)
+    p = p + b_u64(0)
+    // p_vaddr: virtual address (ELF_BASE = 0x400000)
+    p = p + b_u64(ELF_BASE)
+    // p_paddr: physical address (same)
+    p = p + b_u64(ELF_BASE)
+    // p_filesz: size in file
+    p = p + b_u64(file_size)
+    // p_memsz: size in memory (larger to allow heap/stack)
+    p = p + b_u64(mem_size)
+    // p_align: alignment (0x1000 = 4096)
+    p = p + b_u64(0x1000)
+    p
+
+fn elf_build code:[int] data:[int] -> [int]
+    let payload  = code + data
+    let filesize = HDR_TOTAL + len(payload)
+    let memsize  = filesize + 0x100000   // +1MB for heap/stack
+    let entry    = ELF_BASE + HDR_TOTAL  // _start is first byte after headers
+    let hdr      = elf_header(entry, filesize)
+    let phdr     = prog_header(filesize, memsize)
+    hdr + phdr + payload
+
+fn elf_write path:str code:[int] data:[int]
+    let bytes = elf_build(code, data)
+    let r = write_bytes(path, bytes)
+    match r
+        Ok(_) =>
+            chmod_exec(path)
+            println("  ✓ " + to_string(len(bytes)) + " bytes → " + path)
+        Err(e) =>
+            println("  ✗ ELF write error: " + e)
+
+fn elf_build_entry code:[int] data:[int] entry_va:int -> [int]
+    let payload  = code + data
+    let filesize = HDR_TOTAL + len(payload)
+    let memsize  = filesize + 0x100000
+    let hdr  = elf_header(entry_va, filesize)
+    let phdr = prog_header(filesize, memsize)
+    hdr + phdr + payload
+
+fn elf_write_entry path:str code:[int] data:[int] entry_va:int
+    let bytes = elf_build_entry(code, data, entry_va)
+    let r = write_bytes(path, bytes)
+    match r
+        Ok(_) =>
+            chmod_exec(path)
+            println("  ✓ " + to_string(len(bytes)) + " bytes → " + path)
+        Err(e) =>
+            println("  ✗ ELF write error: " + e)

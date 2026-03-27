@@ -1,0 +1,63 @@
+// ============================================================
+//  GRIT v8 — Byte Array Utilities
+//  All binary output goes through these helpers.
+//  Integers are little-endian (x86_64 native format).
+// ============================================================
+
+fn b_u8 n:int -> [int]
+    [n & 0xFF]
+
+fn b_u16 n:int -> [int]
+    [n & 0xFF, (n >> 8) & 0xFF]
+
+fn b_u32 n:int -> [int]
+    [n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]
+
+fn b_u64 n:int -> [int]
+    let lo = n & 0xFFFFFFFF
+    let hi = if n < 0
+        // signed shift for negative numbers
+        let h = (n >> 32) & 0xFFFFFFFF
+        if h < 0 then h + 0x100000000 else h
+    else
+        (n >> 32) & 0xFFFFFFFF
+    append(b_u32(lo), b_u32(hi))
+
+fn b_cat a:[int] b:[int] -> [int] => append(a, b)
+fn b_cat3 a:[int] b:[int] c:[int] -> [int] => append(append(a, b), c)
+fn b_cat4 a:[int] b:[int] c:[int] d:[int] -> [int] => append(append(append(a, b), c), d)
+
+fn b_zeros n:int -> [int]
+    let mut r = []
+    let mut i = 0
+    while i < n
+        r = push(r, 0)
+        i += 1
+    r
+
+fn b_str s:str -> [int]
+    let chars = s.chars()
+    let n = len(chars)
+    let mut r = []
+    let mut i = 0
+    while i < n
+        let c = chars[i]
+        r = push(r, c as int)
+        i += 1
+    r
+
+fn b_str0 s:str -> [int]
+    // null-terminated string
+    push(b_str(s), 0)
+
+fn b_len bytes:[int] -> int => len(bytes)
+
+fn b_patch bytes:[int] offset:int val32:int -> [int]
+    // patch a u32 at offset (for fixing up jump offsets)
+    let mut r = bytes
+    let v = b_u32(val32)
+    r[offset]     = v[0]
+    r[offset + 1] = v[1]
+    r[offset + 2] = v[2]
+    r[offset + 3] = v[3]
+    r

@@ -1,0 +1,980 @@
+// ============================================================
+//  GRIT v8 Native Code Generator — Clean Rewrite
+//  AST → x86_64 machine code + ELF binary. Zero external tools.
+//  Uses helper functions instead of raw struct literals everywhere.
+// ============================================================
+
+// ── AST node helpers ─────────────────────────────────────────
+fn ast_kind node:[str] -> str
+    if len(node) > 0 then node[0] else "UNIT"
+
+fn ast_get node:[str] i:int -> str
+    if i < len(node) then node[i] else ""
+
+
+// ── CompileCtx helpers (no inline struct literals!) ───────────
+
+struct CompileCtx
+    code:        [int]
+    data:        [int]
+    data_offset: int
+    locals:      [str]
+    fn_table:    [str]
+    fixups:      [str]
+    label_cnt:   int
+    frame_size:  int
+    str_pool:    [str]
+
+fn ctx_new -> CompileCtx
+    CompileCtx {
+        code: [], data: [], data_offset: 0,
+        locals: [], fn_table: [], fixups: [],
+        label_cnt: 0, frame_size: 0, str_pool: []
+    }
+
+fn ctx_emit ctx:CompileCtx bytes:[int] -> CompileCtx
+    CompileCtx {
+        code: ctx.code + bytes, data: ctx.data,
+        data_offset: ctx.data_offset, locals: ctx.locals,
+        fn_table: ctx.fn_table, fixups: ctx.fixups,
+        label_cnt: ctx.label_cnt, frame_size: ctx.frame_size,
+        str_pool: ctx.str_pool
+    }
+
+fn ctx_set_code ctx:CompileCtx code:[int] -> CompileCtx
+    CompileCtx {
+        code: code, data: ctx.data,
+        data_offset: ctx.data_offset, locals: ctx.locals,
+        fn_table: ctx.fn_table, fixups: ctx.fixups,
+        label_cnt: ctx.label_cnt, frame_size: ctx.frame_size,
+        str_pool: ctx.str_pool
+    }
+
+fn ctx_add_fixup ctx:CompileCtx pos:int label:str -> CompileCtx
+    CompileCtx {
+        code: ctx.code, data: ctx.data,
+        data_offset: ctx.data_offset, locals: ctx.locals,
+        fn_table: ctx.fn_table,
+        fixups: push(push(ctx.fixups, to_string(pos)), label),
+        label_cnt: ctx.label_cnt, frame_size: ctx.frame_size,
+        str_pool: ctx.str_pool
+    }
+
+fn ctx_add_data ctx:CompileCtx bytes:[int] -> CompileCtx
+    CompileCtx {
+        code: ctx.code,
+        data: ctx.data + bytes,
+        data_offset: ctx.data_offset + len(bytes),
+        locals: ctx.locals, fn_table: ctx.fn_table,
+        fixups: ctx.fixups, label_cnt: ctx.label_cnt,
+        frame_size: ctx.frame_size, str_pool: ctx.str_pool
+    }
+
+fn ctx_add_local ctx:CompileCtx name:str -> CompileCtx
+    CompileCtx {
+        code: ctx.code, data: ctx.data,
+        data_offset: ctx.data_offset,
+        locals: push(ctx.locals, name),
+        fn_table: ctx.fn_table, fixups: ctx.fixups,
+        label_cnt: ctx.label_cnt,
+        frame_size: ctx.frame_size + 8,
+        str_pool: ctx.str_pool
+    }
+
+fn ctx_add_fn ctx:CompileCtx name:str pos:int -> CompileCtx
+    CompileCtx {
+        code: ctx.code, data: ctx.data,
+        data_offset: ctx.data_offset, locals: ctx.locals,
+        fn_table: push(push(ctx.fn_table, name), to_string(pos)),
+        fixups: ctx.fixups, label_cnt: ctx.label_cnt,
+        frame_size: ctx.frame_size, str_pool: ctx.str_pool
+    }
+
+fn ctx_fresh_scope ctx:CompileCtx fn_name:str fn_pos:int -> CompileCtx
+    CompileCtx {
+        code: ctx.code, data: ctx.data,
+        data_offset: ctx.data_offset,
+        locals: [],
+        fn_table: push(push(ctx.fn_table, fn_name), to_string(fn_pos)),
+        fixups: ctx.fixups, label_cnt: ctx.label_cnt,
+        frame_size: 0, str_pool: ctx.str_pool
+    }
+
+fn ctx_new_label ctx:CompileCtx -> CompileCtx
+    CompileCtx {
+        code: ctx.code, data: ctx.data,
+        data_offset: ctx.data_offset, locals: ctx.locals,
+        fn_table: ctx.fn_table, fixups: ctx.fixups,
+        label_cnt: ctx.label_cnt + 1,
+        frame_size: ctx.frame_size, str_pool: ctx.str_pool
+    }
+
+fn ctx_add_strpool ctx:CompileCtx s:str off:int -> CompileCtx
+    CompileCtx {
+        code: ctx.code, data: ctx.data,
+        data_offset: ctx.data_offset, locals: ctx.locals,
+        fn_table: ctx.fn_table, fixups: ctx.fixups,
+        label_cnt: ctx.label_cnt, frame_size: ctx.frame_size,
+        str_pool: push(push(ctx.str_pool, s), to_string(off))
+    }
+
+fn ctx_patch ctx:CompileCtx at:int val:int -> CompileCtx
+    ctx_set_code(ctx, b_patch(ctx.code, at, val))
+
+fn ctx_code_pos ctx:CompileCtx -> int => len(ctx.code)
+
+// ── Local variable lookup ─────────────────────────────────────
+fn ctx_local_slot ctx:CompileCtx name:str -> int
+    let mut i = 0
+    while i < len(ctx.locals)
+        if ctx.locals[i] == name
+            return -(i + 1) * 8
+        i += 1
+    -1
+
+fn fn_table_lookup fn_table:[str] name:str -> int
+    let mut i = 0
+    while i + 1 < len(fn_table)
+        if fn_table[i] == name
+            return match parse_int(fn_table[i + 1])
+                Ok(n) => n
+                Err(_) => -1
+        i += 2
+    -1
+
+// ── String pool lookup ────────────────────────────────────────
+fn strpool_find pool:[str] s:str -> int
+    let mut i = 0
+    while i + 1 < len(pool)
+        if pool[i] == s
+            return match parse_int(pool[i + 1])
+                Ok(n) => n
+                Err(_) => -1
+        i += 2
+    -1
+
+// ── Emit a call with fixup ────────────────────────────────────
+fn ctx_call ctx:CompileCtx label:str -> CompileCtx
+    let pos = ctx_code_pos(ctx)
+    let ctx2 = ctx_emit(ctx, call_rel32(0))
+    ctx_add_fixup(ctx2, pos + 1, label)
+
+// ── Push/pop helpers ─────────────────────────────────────────
+fn cg_push_rax ctx:CompileCtx -> CompileCtx
+    ctx_emit(ctx, push_r64(RAX))
+
+fn cg_pop_rbx ctx:CompileCtx -> CompileCtx
+    ctx_emit(ctx, pop_r64(RBX))
+
+fn cg_pop_rax ctx:CompileCtx -> CompileCtx
+    ctx_emit(ctx, pop_r64(RAX))
+
+// ── Load a string literal into a register ────────────────────
+fn cg_load_str ctx:CompileCtx s:str reg:int -> CompileCtx
+    // Check string pool
+    let found = strpool_find(ctx.str_pool, s)
+    let off = if found >= 0 then found else ctx.data_offset
+    let ctx2 = if found >= 0
+        ctx
+    else
+        let ctx_d = ctx_add_data(ctx, b_str(s) + [0])
+        ctx_add_strpool(ctx_d, s, off)
+    // LEA reg, [rip + rel32]
+    let rex = if reg >= 8 then rex_wr() else rex_w()
+    let code_pos = ctx_code_pos(ctx2)
+    let ctx3 = ctx_emit(ctx2, [rex, 0x8D, modrm_rip(reg), 0, 0, 0, 0])
+    ctx_add_fixup(ctx3, code_pos + 3, "DATA:" + to_string(off))
+
+// ── Expression compiler ───────────────────────────────────────
+fn cg_expr ctx:CompileCtx node:[str] -> CompileCtx
+    let k = ast_kind(node)
+    if k == "INT"
+        let n = match parse_int(ast_get(node, 1))
+            Ok(v) => v
+            Err(_) => 0
+        return ctx_emit(ctx, mov_r64_imm64(RAX, n))
+
+    if k == "FLOAT"
+        return ctx_emit(ctx, xor_r64_r64(RAX, RAX))
+
+    if k == "BOOL"
+        let v = if ast_get(node, 1) == "true" then 1 else 0
+        return ctx_emit(ctx, mov_r64_imm32(RAX, v))
+
+    if k == "UNIT"
+        return ctx_emit(ctx, xor_r64_r64(RAX, RAX))
+
+    if k == "STR"
+        return cg_load_str(ctx, ast_get(node, 1), RSI)
+
+    if k == "VAR"
+        let name = ast_get(node, 1)
+        let slot = ctx_local_slot(ctx, name)
+        if slot != -1
+            return ctx_emit(ctx, mov_r64_rbpoff(RAX, slot))
+        return ctx_emit(ctx, xor_r64_r64(RAX, RAX))
+
+    if k == "UNARY"
+        let op = ast_get(node, 1)
+        let ctx2 = cg_expr(ctx, node[2])
+        if op == "-"
+            return ctx_emit(ctx2, neg_r64(RAX))
+        if op == "!"
+            let ctx3 = ctx_emit(ctx2, cmp_r64_imm32(RAX, 0))
+            let ctx4 = ctx_emit(ctx3, sete_al())
+            return ctx_emit(ctx4, movzx_rax_al())
+        return ctx2
+
+    if k == "BIN"
+        return cg_binop(ctx, ast_get(node, 1), node[2], node[3])
+
+    if k == "ASSIGN"
+        return cg_assign(ctx, node[1], ast_get(node, 2), node[3])
+
+    if k == "CALL"
+        return cg_call_expr(ctx, node[1], node[2])
+
+    if k == "METHOD"
+        return cg_method(ctx, node[1], ast_get(node, 2), node[3])
+
+    if k == "IF"
+        return cg_if(ctx, node[1], node[2], node[3])
+
+    if k == "WHILE"
+        return cg_while(ctx, node[1], node[2])
+
+    if k == "FOR"
+        return cg_for(ctx, ast_get(node, 1), node[2], node[3])
+
+    if k == "BLOCK"
+        return cg_block(ctx, node)
+
+    if k == "RETURN"
+        let val_node = node[1]
+        let ctx2 = if ast_kind(val_node) == "UNIT"
+            ctx_emit(ctx, xor_r64_r64(RAX, RAX))
+        else
+            cg_expr(ctx, val_node)
+        return ctx_emit(ctx2, fn_epilogue())
+
+    if k == "ARRAY"
+        return cg_array_lit(ctx, node)
+
+    if k == "TUPLE"
+        return cg_tuple_lit(ctx, node)
+
+    if k == "STRUCT_LIT"
+        return cg_struct_lit(ctx, node)
+
+    if k == "FIELD"
+        let ctx2 = cg_expr(ctx, node[1])
+        return ctx_emit(ctx2, mov_r64_mem64(RAX, RAX, 0))
+
+    if k == "INDEX"
+        let ctx2 = cg_expr(ctx, node[1])
+        let ctx3 = cg_push_rax(ctx2)
+        let ctx4 = cg_expr(ctx3, node[2])
+        let ctx5 = ctx_emit(ctx4, mov_r64_r64(RCX, RAX))
+        let ctx6 = cg_pop_rbx(ctx5)
+        let ctx7 = ctx_emit(ctx6, mov_r64_mem64(RAX, RBX, 8))
+        return ctx_emit(ctx7, [0x48, 0x8B, 0x04, 0xC8])
+
+    if k == "MATCH"
+        return cg_match(ctx, node)
+
+    ctx_emit(ctx, xor_r64_r64(RAX, RAX))
+
+// ── Binary operators ──────────────────────────────────────────
+fn cg_binop ctx:CompileCtx op:str lhs:[str] rhs:[str] -> CompileCtx
+    if op == "&&"
+        return cg_and(ctx, lhs, rhs)
+    if op == "||"
+        return cg_or(ctx, lhs, rhs)
+    if op == ".." || op == "..="
+        return cg_range(ctx, lhs, rhs, op == "..=")
+
+    let ctx2 = cg_expr(ctx, lhs)
+    let ctx3 = cg_push_rax(ctx2)
+    let ctx4 = cg_expr(ctx3, rhs)
+    let ctx5 = cg_pop_rbx(ctx4)
+
+    // Use if/else instead of match to avoid parse issues with block match arms
+    if op == "+"
+        return ctx_emit(ctx5, add_r64_r64(RAX, RBX))
+    if op == "-"
+        let ctx6 = ctx_emit(ctx5, xchg_rax_rbx())
+        return ctx_emit(ctx6, sub_r64_r64(RAX, RBX))
+    if op == "*"
+        return ctx_emit(ctx5, imul_r64_r64(RAX, RBX))
+    if op == "/"
+        let ctx6 = ctx_emit(ctx5, xchg_rax_rbx())
+        return ctx_emit(ctx6, idiv_r64(RBX))
+    if op == "%"
+        let ctx6 = ctx_emit(ctx5, xchg_rax_rbx())
+        let ctx7 = ctx_emit(ctx6, idiv_r64(RBX))
+        return ctx_emit(ctx7, mov_r64_r64(RAX, RDX))
+    if op == "=="
+        return cg_cmp(ctx5, sete_al())
+    if op == "!="
+        return cg_cmp(ctx5, setne_al())
+    if op == "<"
+        return cg_cmp(ctx5, setl_al())
+    if op == "<="
+        return cg_cmp(ctx5, setle_al())
+    if op == ">"
+        return cg_cmp(ctx5, setg_al())
+    if op == ">="
+        return cg_cmp(ctx5, setge_al())
+    ctx5
+
+fn cg_cmp ctx:CompileCtx setbytes:[int] -> CompileCtx
+    let ctx2 = ctx_emit(ctx, cmp_r64_r64(RBX, RAX))
+    let ctx3 = ctx_emit(ctx2, setbytes)
+    ctx_emit(ctx3, movzx_rax_al())
+
+fn xchg_rax_rbx -> [int] => [0x48, 0x87, 0xD8]
+
+fn cg_and ctx:CompileCtx lhs:[str] rhs:[str] -> CompileCtx
+    let ctx2 = cg_expr(ctx, lhs)
+    let ctx3 = ctx_emit(ctx2, test_r64_r64(RAX, RAX))
+    let jz_pos = ctx_code_pos(ctx3)
+    let ctx4 = ctx_emit(ctx3, je_rel32(0))
+    let ctx5 = cg_expr(ctx4, rhs)
+    let ctx6 = ctx_emit(ctx5, test_r64_r64(RAX, RAX))
+    let ctx7 = ctx_emit(ctx6, setne_al())
+    let ctx8 = ctx_emit(ctx7, movzx_rax_al())
+    let after = ctx_code_pos(ctx8)
+    ctx_patch(ctx8, jz_pos + 2, after - (jz_pos + 6))
+
+fn cg_or ctx:CompileCtx lhs:[str] rhs:[str] -> CompileCtx
+    let ctx2 = cg_expr(ctx, lhs)
+    let ctx3 = ctx_emit(ctx2, test_r64_r64(RAX, RAX))
+    let jnz_pos = ctx_code_pos(ctx3)
+    let ctx4 = ctx_emit(ctx3, jne_rel32(0))
+    let ctx5 = cg_expr(ctx4, rhs)
+    let ctx6 = ctx_emit(ctx5, test_r64_r64(RAX, RAX))
+    let ctx7 = ctx_emit(ctx6, setne_al())
+    let ctx8 = ctx_emit(ctx7, movzx_rax_al())
+    let jmp_pos = ctx_code_pos(ctx8)
+    let ctx9 = ctx_emit(ctx8, jmp_rel32(0))
+    let true_pos = ctx_code_pos(ctx9)
+    let ctx10 = ctx_emit(ctx9, mov_r64_imm32(RAX, 1))
+    let after = ctx_code_pos(ctx10)
+    let ctx11 = ctx_patch(ctx10, jnz_pos + 2, true_pos - (jnz_pos + 6))
+    ctx_patch(ctx11, jmp_pos + 1, after - (jmp_pos + 5))
+
+fn cg_range ctx:CompileCtx start:[str] end_e:[str] inclusive:bool -> CompileCtx
+    let ctx2 = cg_expr(ctx, start)
+    let ctx3 = cg_push_rax(ctx2)
+    let ctx4 = cg_expr(ctx3, end_e)
+    let ctx5 = cg_pop_rbx(ctx4)
+    let ctx6 = ctx_emit(ctx5, mov_r64_r64(RSI, RAX))
+    let ctx7 = ctx_emit(ctx6, mov_r64_r64(RDI, RBX))
+    let ctx8 = if inclusive
+        ctx_emit(ctx7, add_r64_imm32(RSI, 1))
+    else
+        ctx7
+    ctx_call(ctx8, "RT:grit_range_create")
+
+// ── Assignment ────────────────────────────────────────────────
+fn cg_assign ctx:CompileCtx target:[str] op:str value:[str] -> CompileCtx
+    let ctx2 = cg_expr(ctx, value)
+    let tname = ast_get(target, 1)
+    let slot = ctx_local_slot(ctx2, tname)
+    if slot == -1
+        return ctx2
+    if op == "="
+        return ctx_emit(ctx2, mov_rbpoff_r64(slot, RAX))
+    let ctx3 = ctx_emit(ctx2, mov_r64_rbpoff(RBX, slot))
+    if op == "+="
+        let ctx4 = ctx_emit(ctx3, add_r64_r64(RAX, RBX))
+        return ctx_emit(ctx4, mov_rbpoff_r64(slot, RAX))
+    if op == "-="
+        let ctxa = ctx_emit(ctx3, xchg_rax_rbx())
+        let ctx4 = ctx_emit(ctxa, sub_r64_r64(RAX, RBX))
+        return ctx_emit(ctx4, mov_rbpoff_r64(slot, RAX))
+    if op == "*="
+        let ctx4 = ctx_emit(ctx3, imul_r64_r64(RAX, RBX))
+        return ctx_emit(ctx4, mov_rbpoff_r64(slot, RAX))
+    let ctx4 = ctx3
+    ctx_emit(ctx4, mov_rbpoff_r64(slot, RAX))
+
+// ── Control flow ──────────────────────────────────────────────
+fn cg_if ctx:CompileCtx cond:[str] then_b:[str] else_b:[str] -> CompileCtx
+    let ctx2 = cg_expr(ctx, cond)
+    let ctx3 = ctx_emit(ctx2, test_r64_r64(RAX, RAX))
+    let jz_pos = ctx_code_pos(ctx3)
+    let ctx4 = ctx_emit(ctx3, je_rel32(0))
+    let ctx5 = cg_expr(ctx4, then_b)
+    let jmp_pos = ctx_code_pos(ctx5)
+    let ctx6 = ctx_emit(ctx5, jmp_rel32(0))
+    let else_start = ctx_code_pos(ctx6)
+    let ctx7 = ctx_patch(ctx6, jz_pos + 2, else_start - (jz_pos + 6))
+    let ctx8 = if ast_kind(else_b) != "UNIT"
+        cg_expr(ctx7, else_b)
+    else
+        ctx7
+    let after = ctx_code_pos(ctx8)
+    ctx_patch(ctx8, jmp_pos + 1, after - (jmp_pos + 5))
+
+fn cg_while ctx:CompileCtx cond:[str] body:[str] -> CompileCtx
+    let loop_top = ctx_code_pos(ctx)
+    let ctx2 = cg_expr(ctx, cond)
+    let ctx3 = ctx_emit(ctx2, test_r64_r64(RAX, RAX))
+    let jz_pos = ctx_code_pos(ctx3)
+    let ctx4 = ctx_emit(ctx3, je_rel32(0))
+    let ctx5 = cg_expr(ctx4, body)
+    let jmp_back = loop_top - (ctx_code_pos(ctx5) + 5)
+    let ctx6 = ctx_emit(ctx5, jmp_rel32(jmp_back))
+    let after = ctx_code_pos(ctx6)
+    ctx_patch(ctx6, jz_pos + 2, after - (jz_pos + 6))
+
+fn cg_for ctx:CompileCtx var:str iter:[str] body:[str] -> CompileCtx
+    let ctx2 = cg_expr(ctx, iter)
+    let ctx3 = ctx_add_local(ctx2, "__arr")
+    let arr_slot = ctx_local_slot(ctx3, "__arr")
+    let ctx4 = ctx_emit(ctx3, mov_rbpoff_r64(arr_slot, RAX))
+    let ctx5 = ctx_add_local(ctx4, "__idx")
+    let idx_slot = ctx_local_slot(ctx5, "__idx")
+    let ctx6 = ctx_emit(ctx5, xor_r64_r64(RAX, RAX))
+    let ctx7 = ctx_emit(ctx6, mov_rbpoff_r64(idx_slot, RAX))
+    let ctx8 = ctx_add_local(ctx7, var)
+    let var_slot = ctx_local_slot(ctx8, var)
+    let loop_top = ctx_code_pos(ctx8)
+    let ctx9  = ctx_emit(ctx8,  mov_r64_rbpoff(RAX, arr_slot))
+    let ctx10 = ctx_emit(ctx9,  mov_r64_mem64(RBX, RAX, 0))
+    let ctx11 = ctx_emit(ctx10, mov_r64_rbpoff(RAX, idx_slot))
+    let ctx12 = ctx_emit(ctx11, cmp_r64_r64(RAX, RBX))
+    let jge_pos = ctx_code_pos(ctx12)
+    let ctx13 = ctx_emit(ctx12, jge_rel32(0))
+    let ctx14 = ctx_emit(ctx13, mov_r64_rbpoff(RBX, arr_slot))
+    let ctx15 = ctx_emit(ctx14, mov_r64_mem64(RBX, RBX, 8))
+    let ctx16 = ctx_emit(ctx15, mov_r64_rbpoff(RCX, idx_slot))
+    let ctx17 = ctx_emit(ctx16, [0x48, 0x8B, 0x04, 0xCB])
+    let ctx18 = ctx_emit(ctx17, mov_rbpoff_r64(var_slot, RAX))
+    let ctx19 = cg_expr(ctx18, body)
+    let ctx20 = ctx_emit(ctx19, mov_r64_rbpoff(RAX, idx_slot))
+    let ctx21 = ctx_emit(ctx20, add_r64_imm32(RAX, 1))
+    let ctx22 = ctx_emit(ctx21, mov_rbpoff_r64(idx_slot, RAX))
+    let jmp_back = loop_top - (ctx_code_pos(ctx22) + 5)
+    let ctx23 = ctx_emit(ctx22, jmp_rel32(jmp_back))
+    let after = ctx_code_pos(ctx23)
+    ctx_patch(ctx23, jge_pos + 2, after - (jge_pos + 6))
+
+fn cg_block ctx:CompileCtx block:[str] -> CompileCtx
+    let n = len(block) - 1
+    let mut c = ctx
+    let mut i = 0
+    while i < n
+        c = cg_stmt(c, block[i + 1])
+        i += 1
+    c
+
+// ── Statement compiler ────────────────────────────────────────
+fn cg_stmt ctx:CompileCtx stmt:[str] -> CompileCtx
+    let k = ast_kind(stmt)
+    if k == "LET"
+        let name = ast_get(stmt, 1)
+        let ctx2 = ctx_add_local(ctx, name)
+        let slot = ctx_local_slot(ctx2, name)
+        let ctx3 = cg_expr(ctx2, stmt[3])
+        return ctx_emit(ctx3, mov_rbpoff_r64(slot, RAX))
+
+    if k == "RETURN"
+        let ctx2 = if ast_kind(stmt[1]) == "UNIT"
+            ctx_emit(ctx, xor_r64_r64(RAX, RAX))
+        else
+            cg_expr(ctx, stmt[1])
+        return ctx_emit(ctx2, fn_epilogue())
+
+    if k == "WHILE"
+        return cg_while(ctx, stmt[1], stmt[2])
+    if k == "FOR"
+        return cg_for(ctx, ast_get(stmt, 1), stmt[2], stmt[3])
+    if k == "IF"
+        return cg_if(ctx, stmt[1], stmt[2], stmt[3])
+    if k == "MATCH"
+        return cg_match(ctx, stmt)
+    if k == "BREAK"
+        return ctx_emit(ctx, nop_op())
+    if k == "CONTINUE"
+        return ctx_emit(ctx, nop_op())
+    if k == "BLOCK"
+        return cg_block(ctx, stmt)
+    if k == "FN"
+        return ctx
+    if k == "STRUCT_DEF" || k == "ENUM_DEF" || k == "IMPL_DEF"
+        return ctx
+
+    let ctx2 = cg_expr(ctx, stmt)
+    ctx_emit(ctx2, [0x48, 0x85, 0xC0])
+
+// ── Struct/Tuple/Array literals ───────────────────────────────
+fn cg_struct_lit ctx:CompileCtx node:[str] -> CompileCtx
+    let n_fields = len(node) - 2
+    let size = (n_fields + 1) * 8
+    let ctx2 = ctx_emit(ctx, mov_r64_imm32(RDI, size))
+    let ctx3 = ctx_call(ctx2, "RT:grit_alloc")
+    let ctx4 = cg_push_rax(ctx3)
+    let mut c = ctx4
+    let mut i = 0
+    while i < n_fields
+        let fval = node[i + 2][2]
+        c = cg_expr(c, fval)
+        c = ctx_emit(c, [0x48, 0x8B, 0x5C, 0x24, 0x00])
+        let off = i * 8
+        c = if off == 0
+            ctx_emit(c, [0x48, 0x89, 0x03])
+        else if off < 128
+            ctx_emit(c, [0x48, 0x89, 0x43] + b_u8(off))
+        else
+            ctx_emit(c, [0x48, 0x89, 0x83] + b_u32(off))
+        i += 1
+    cg_pop_rax(c)
+
+fn cg_tuple_lit ctx:CompileCtx node:[str] -> CompileCtx
+    let n = len(node) - 1
+    let ctx2 = ctx_emit(ctx, mov_r64_imm32(RDI, n * 8))
+    let ctx3 = ctx_call(ctx2, "RT:grit_alloc")
+    let ctx4 = cg_push_rax(ctx3)
+    let mut c = ctx4
+    let mut i = 0
+    while i < n
+        c = cg_expr(c, node[i + 1])
+        c = ctx_emit(c, [0x48, 0x8B, 0x5C, 0x24, 0x00])
+        let off = i * 8
+        c = if off < 128
+            ctx_emit(c, [0x48, 0x89, 0x43] + b_u8(off))
+        else
+            ctx_emit(c, [0x48, 0x89, 0x83] + b_u32(off))
+        i += 1
+    cg_pop_rax(c)
+
+fn cg_array_lit ctx:CompileCtx node:[str] -> CompileCtx
+    let n = len(node) - 1
+    // Allocate GritArray header {len, cap, data_ptr}
+    let ctx2 = ctx_emit(ctx, mov_r64_imm32(RDI, 24))
+    let ctx3 = ctx_call(ctx2, "RT:grit_alloc")
+    // rax = arr ptr; store len and cap
+    let ctx4 = ctx_emit(ctx3, mov_r64_imm64(RBX, n))
+    let ctx5 = ctx_emit(ctx4, mov_mem64_r64(RAX, 0, RBX))
+    let ctx6 = ctx_emit(ctx5, mov_mem64_r64(RAX, 8, RBX))
+    // Allocate data buffer
+    let ctx7 = cg_push_rax(ctx6)
+    let ctx8 = ctx_emit(ctx7, mov_r64_imm32(RDI, n * 8 + 8))
+    let ctx9 = ctx_call(ctx8, "RT:grit_alloc")
+    // Link data buffer to array
+    let ctx10 = ctx_emit(ctx9, [0x48, 0x8B, 0x5C, 0x24, 0x00])
+    let ctx11 = ctx_emit(ctx10, mov_mem64_r64(RBX, 16, RAX))
+    let ctx12 = cg_push_rax(ctx11)
+    // Fill elements
+    let mut c = ctx12
+    let mut i = 0
+    while i < n
+        c = cg_expr(c, node[i + 1])
+        c = ctx_emit(c, [0x48, 0x8B, 0x5C, 0x24, 0x00])
+        let off = i * 8
+        c = if off < 128
+            ctx_emit(c, [0x48, 0x89, 0x43] + b_u8(off))
+        else
+            ctx_emit(c, [0x48, 0x89, 0x83] + b_u32(off))
+        i += 1
+    let ctx13 = cg_pop_rax(c)
+    cg_pop_rax(ctx13)
+
+// ── Function calls ────────────────────────────────────────────
+fn cg_call_expr ctx:CompileCtx callee:[str] args:[str] -> CompileCtx
+    let fname = if ast_kind(callee) == "VAR" then ast_get(callee, 1) else "??"
+    let n = len(args) - 1
+
+    if fname == "println"
+        return cg_println(ctx, args)
+    if fname == "print"
+        return cg_print_call(ctx, args)
+    if fname == "len"
+        return cg_len(ctx, args)
+    if fname == "push"
+        return cg_builtin(ctx, args, "RT:grit_arr_push")
+    if fname == "pop"
+        return cg_builtin(ctx, args, "RT:grit_arr_pop")
+    if fname == "append"
+        return cg_builtin(ctx, args, "RT:grit_arr_append")
+    if fname == "to_string"
+        return cg_to_string(ctx, args)
+    if fname == "parse_int"
+        return cg_parse_int(ctx, args)
+    if fname == "to_upper" || fname == "to_lower" || fname == "trim"
+        return cg_str_method(ctx, args, "RT:grit_" + fname)
+
+    // User function
+    let arg_regs = [RDI, RSI, RDX, RCX, R8, R9]
+    let mut c = ctx
+    let mut i = 0
+    while i < n && i < 6
+        c = cg_expr(c, args[i + 1])
+        let reg = arg_regs[i]
+        if reg != RAX
+            c = ctx_emit(c, mov_r64_r64(reg, RAX))
+        i += 1
+    ctx_call(c, "FN:" + fname)
+
+fn cg_method ctx:CompileCtx recv:[str] method:str args:[str] -> CompileCtx
+    let ctx2 = cg_expr(ctx, recv)
+    let ctx3 = ctx_emit(ctx2, mov_r64_r64(RDI, RAX))
+    if method == "len"
+        return ctx_emit(ctx3, mov_r64_mem64(RAX, RAX, 0))
+    if method == "chars"
+        return ctx_call(ctx3, "RT:grit_str_chars")
+    if method == "push"
+        if len(args) > 1
+            let ctx4 = cg_expr(ctx3, args[1])
+            let ctx5 = ctx_emit(ctx4, mov_r64_r64(RSI, RAX))
+            return ctx_call(ctx5, "RT:grit_arr_push")
+        return ctx3
+    if method == "split"
+        if len(args) > 1
+            let ctx4 = cg_expr(ctx3, args[1])
+            let ctx5 = ctx_emit(ctx4, mov_r64_r64(RSI, RAX))
+            return ctx_call(ctx5, "RT:grit_str_split")
+        return ctx3
+    if method == "trim"
+        return ctx_call(ctx3, "RT:grit_trim")
+    if method == "to_string"
+        return ctx_call(ctx3, "RT:grit_itoa")
+    if method == "ends_with"
+        if len(args) > 1
+            let ctx4 = cg_load_str(ctx3, ast_get(args[1], 1), RSI)
+            return ctx_call(ctx4, "RT:grit_ends_with")
+        return ctx3
+    if method == "contains"
+        if len(args) > 1
+            let ctx4 = cg_load_str(ctx3, ast_get(args[1], 1), RSI)
+            return ctx_call(ctx4, "RT:grit_str_contains")
+        return ctx3
+    ctx3
+
+// ── println / print ───────────────────────────────────────────
+fn cg_println ctx:CompileCtx args:[str] -> CompileCtx
+    if len(args) < 2
+        let ctx2 = ctx_emit(ctx, [0x48, 0x83, 0xEC, 0x10])
+        let ctx3 = ctx_emit(ctx2, [0xC6, 0x04, 0x24, 0x0A])
+        let ctx4 = ctx_emit(ctx3, mov_r64_r64(RSI, RSP))
+        let ctx5 = ctx_emit(ctx4, mov_r64_imm32(RDI, 1))
+        let ctx6 = ctx_emit(ctx5, mov_r64_imm32(RDX, 1))
+        let ctx7 = ctx_emit(ctx6, mov_r64_imm32(RAX, 1))
+        let ctx8 = ctx_emit(ctx7, syscall_op())
+        return ctx_emit(ctx8, [0x48, 0x83, 0xC4, 0x10])
+    let arg = args[1]
+    let ak = ast_kind(arg)
+    if ak == "STR"
+        let s = ast_get(arg, 1) + "\n"
+        let ctx2 = cg_load_str(ctx, s, RSI)
+        let ctx3 = ctx_emit(ctx2, mov_r64_imm32(RDI, 1))
+        let ctx4 = ctx_emit(ctx3, mov_r64_imm32(RDX, len(s)))
+        let ctx5 = ctx_emit(ctx4, mov_r64_imm32(RAX, 1))
+        return ctx_emit(ctx5, syscall_op())
+    let ctx2 = cg_expr(ctx, arg)
+    let ctx3 = ctx_emit(ctx2, mov_r64_r64(RDI, RAX))
+    let lbl = if ak == "BOOL" then "RT:grit_println_b" else "RT:grit_println_i"
+    ctx_call(ctx3, lbl)
+
+fn cg_print_call ctx:CompileCtx args:[str] -> CompileCtx
+    if len(args) < 2 then return ctx
+    let arg = args[1]
+    if ast_kind(arg) == "STR"
+        let s = ast_get(arg, 1)
+        let ctx2 = cg_load_str(ctx, s, RSI)
+        let ctx3 = ctx_emit(ctx2, mov_r64_imm32(RDI, 1))
+        let ctx4 = ctx_emit(ctx3, mov_r64_imm32(RDX, len(s)))
+        let ctx5 = ctx_emit(ctx4, mov_r64_imm32(RAX, 1))
+        return ctx_emit(ctx5, syscall_op())
+    cg_expr(ctx, arg)
+
+fn cg_len ctx:CompileCtx args:[str] -> CompileCtx
+    if len(args) < 2 then return ctx_emit(ctx, xor_r64_r64(RAX, RAX))
+    let ctx2 = cg_expr(ctx, args[1])
+    ctx_emit(ctx2, mov_r64_mem64(RAX, RAX, 0))
+
+fn cg_builtin ctx:CompileCtx args:[str] label:str -> CompileCtx
+    if len(args) >= 2
+        let ctx2 = cg_expr(ctx, args[1])
+        let ctx3 = ctx_emit(ctx2, mov_r64_r64(RDI, RAX))
+        let ctx4 = if len(args) >= 3
+            let c = cg_expr(ctx3, args[2])
+            ctx_emit(c, mov_r64_r64(RSI, RAX))
+        else
+            ctx3
+        return ctx_call(ctx4, label)
+    ctx
+
+fn cg_str_method ctx:CompileCtx args:[str] label:str -> CompileCtx
+    if len(args) < 2 then return ctx
+    let ctx2 = cg_expr(ctx, args[1])
+    let ctx3 = ctx_emit(ctx2, mov_r64_r64(RDI, RAX))
+    ctx_call(ctx3, label)
+
+fn cg_to_string ctx:CompileCtx args:[str] -> CompileCtx
+    if len(args) < 2 then return ctx
+    let ctx2 = cg_expr(ctx, args[1])
+    let ctx3 = ctx_emit(ctx2, mov_r64_r64(RDI, RAX))
+    let ctx4 = ctx_emit(ctx3, [0x48, 0x83, 0xEC, 0x20])
+    let ctx5 = ctx_emit(ctx4, mov_r64_r64(RSI, RSP))
+    let ctx6 = ctx_call(ctx5, "RT:grit_itoa")
+    let ctx7 = ctx_emit(ctx6, mov_r64_r64(RDI, RSP))
+    let ctx8 = ctx_emit(ctx7, mov_r64_r64(RSI, RAX))
+    let ctx9 = ctx_call(ctx8, "RT:grit_strndup")
+    ctx_emit(ctx9, [0x48, 0x83, 0xC4, 0x20])
+
+fn cg_parse_int ctx:CompileCtx args:[str] -> CompileCtx
+    if len(args) < 2 then return ctx
+    let ctx2 = cg_expr(ctx, args[1])
+    let ctx3 = ctx_emit(ctx2, mov_r64_r64(RDI, RAX))
+    ctx_call(ctx3, "RT:grit_parse_int")
+
+// ── Pattern matching ──────────────────────────────────────────
+fn cg_match ctx:CompileCtx node:[str] -> CompileCtx
+    let n_arms = len(node) - 2
+    let ctx2 = cg_expr(ctx, node[1])
+    let ctx3 = cg_push_rax(ctx2)
+    let mut c = ctx3
+    let mut end_patches = []
+    let mut i = 0
+    while i < n_arms
+        let arm = node[i + 2]
+        let pat = arm[1]
+        let body = arm[3]
+        c = ctx_emit(c, [0x48, 0x8B, 0x04, 0x24])
+        c = cg_pat_test(c, pat)
+        c = ctx_emit(c, test_r64_r64(RAX, RAX))
+        let jz_pos = ctx_code_pos(c)
+        c = ctx_emit(c, je_rel32(0))
+        c = ctx_emit(c, [0x48, 0x8B, 0x04, 0x24])
+        c = cg_pat_bind(c, pat)
+        c = cg_expr(c, body)
+        let jmp_pos = ctx_code_pos(c)
+        c = ctx_emit(c, jmp_rel32(0))
+        end_patches = push(end_patches, jmp_pos)
+        let next = ctx_code_pos(c)
+        c = ctx_patch(c, jz_pos + 2, next - (jz_pos + 6))
+        i += 1
+    let end_pos = ctx_code_pos(c) + 4
+    let mut ci = 0
+    while ci < len(end_patches)
+        let p = end_patches[ci]
+        c = ctx_patch(c, p + 1, end_pos - (p + 5))
+        ci += 1
+    ctx_emit(c, pop_r64(RCX))
+
+fn cg_pat_test ctx:CompileCtx pat:[str] -> CompileCtx
+    let k = ast_kind(pat)
+    if k == "PAT_WILD" || k == "PAT_BIND" || k == "PAT_UNIT" || k == "PAT_TUPLE"
+        return ctx_emit(ctx, mov_r64_imm32(RAX, 1))
+    if k == "PAT_INT"
+        let v = match parse_int(ast_get(pat, 1))
+            Ok(n) => n
+            Err(_) => 0
+        let ctx2 = ctx_emit(ctx, cmp_r64_imm32(RAX, v))
+        let ctx3 = ctx_emit(ctx2, sete_al())
+        return ctx_emit(ctx3, movzx_rax_al())
+    if k == "PAT_BOOL"
+        let v = if ast_get(pat, 1) == "true" then 1 else 0
+        let ctx2 = ctx_emit(ctx, cmp_r64_imm32(RAX, v))
+        let ctx3 = ctx_emit(ctx2, sete_al())
+        return ctx_emit(ctx3, movzx_rax_al())
+    ctx_emit(ctx, mov_r64_imm32(RAX, 1))
+
+fn cg_pat_bind ctx:CompileCtx pat:[str] -> CompileCtx
+    let k = ast_kind(pat)
+    if k == "PAT_BIND"
+        let name = ast_get(pat, 1)
+        let slot = ctx_local_slot(ctx, name)
+        if slot != -1
+            return ctx_emit(ctx, mov_rbpoff_r64(slot, RAX))
+        let ctx2 = ctx_add_local(ctx, name)
+        let s2 = ctx_local_slot(ctx2, name)
+        return ctx_emit(ctx2, mov_rbpoff_r64(s2, RAX))
+    if k == "PAT_ENUM"
+        // Extract payload[0] if there's a binding
+        if len(pat) > 2
+            let subpat = pat[2]
+            let payload = [0x48, 0x8B, 0x40, 0x08]
+            let ctx2 = ctx_emit(ctx, payload)
+            return cg_pat_bind(ctx2, subpat)
+        return ctx
+    ctx
+
+// ── Function compilation ──────────────────────────────────────
+fn compile_fn ctx:CompileCtx fnode:[str] -> CompileCtx
+    let fname = ast_get(fnode, 1)
+    let params = fnode[2]
+    let body = fnode[3]
+    let n_params = len(params)  // params is flat ["name1","name2",...], no header
+    let fn_pos = ctx_code_pos(ctx)
+    let ctx2 = ctx_fresh_scope(ctx, fname, fn_pos)
+    let arg_regs = [RDI, RSI, RDX, RCX, R8, R9]
+    let mut c = ctx2
+    let mut pi = 0
+    while pi < n_params && pi < 6
+        c = ctx_add_local(c, params[pi])
+        pi += 1
+    let ctx3 = ctx_emit(c, fn_prologue(c.frame_size + 64))
+    let mut cx = ctx3
+    pi = 0
+    while pi < n_params && pi < 6
+        let slot = ctx_local_slot(cx, params[pi])
+        cx = ctx_emit(cx, mov_rbpoff_r64(slot, arg_regs[pi]))
+        pi += 1
+    let ctx4 = cg_block(cx, body)
+    ctx_emit(ctx4, fn_epilogue())
+
+fn compile_impl ctx:CompileCtx impl_node:[str] -> CompileCtx
+    let type_name = ast_get(impl_node, 1)
+    let methods = impl_node[2]
+    let n = len(methods) - 1
+    let mut c = ctx
+    let mut i = 0
+    while i < n
+        let m = methods[i + 1]
+        let renamed = ["FN", type_name + "__" + ast_get(m, 1), m[2], m[3]]
+        c = compile_fn(c, renamed)
+        i += 1
+    c
+
+fn compile_start ctx:CompileCtx -> CompileCtx
+    let pos = ctx_code_pos(ctx)
+    let ctx2 = ctx_add_fn(ctx, "_start", pos)
+    // and rsp, -16  (16-byte align stack per ABI)
+    let ctx3 = ctx_emit(ctx2, [0x48, 0x83, 0xE4, 0xF0])
+    // call main
+    let ctx4 = ctx_call(ctx3, "FN:main")
+    // xor rdi, rdi  (exit code = 0)
+    let ctx5 = ctx_emit(ctx4, xor_r64_r64(RDI, RDI))
+    // mov rax, 60  (sys_exit)
+    let ctx6 = ctx_emit(ctx5, mov_r64_imm32(RAX, 60))
+    // syscall
+    ctx_emit(ctx6, syscall_op())
+
+// ── Fixup pass ────────────────────────────────────────────────
+// ── Runtime offset lookup helpers (avoid match with many arms) ───
+fn rt_func_offset fname:str -> int
+    if fname == "grit_alloc"        then return RT_ALLOC
+    if fname == "grit_panic"        then return RT_PANIC
+    if fname == "grit_println_i"    then return RT_PRINTLN_I
+    if fname == "grit_println_s"    then return RT_PRINTLN_S
+    if fname == "grit_println_b"    then return RT_PRINTLN_B
+    if fname == "grit_range_create" then return RT_ALLOC
+    if fname == "grit_arr_push"     then return RT_ALLOC
+    if fname == "grit_arr_pop"      then return RT_ALLOC
+    if fname == "grit_arr_append"   then return RT_ALLOC
+    if fname == "grit_str_chars"    then return RT_ALLOC
+    if fname == "grit_strndup"      then return RT_ALLOC
+    -1
+
+fn rt_name_offset rname:str -> int
+    if rname == "grit_alloc"        then return RT_ALLOC
+    if rname == "grit_panic"        then return RT_PANIC
+    if rname == "grit_println_i"    then return RT_PRINTLN_I
+    if rname == "grit_println_s"    then return RT_PRINTLN_S
+    if rname == "grit_println_b"    then return RT_PRINTLN_B
+    if rname == "grit_range_create" then return RT_ALLOC
+    if rname == "grit_arr_push"     then return RT_ALLOC
+    if rname == "grit_arr_pop"      then return RT_ALLOC
+    if rname == "grit_arr_append"   then return RT_ALLOC
+    if rname == "grit_str_chars"    then return RT_ALLOC
+    if rname == "grit_strndup"      then return RT_ALLOC
+    if rname == "grit_itoa"         then return RT_ITOA
+    if rname == "grit_parse_int"    then return RT_ALLOC
+    if rname == "grit_str_split"    then return RT_ALLOC
+    if rname == "grit_ends_with"    then return RT_ALLOC
+    if rname == "grit_str_contains" then return RT_ALLOC
+    if rname == "grit_to_upper"     then return RT_ALLOC
+    if rname == "grit_to_lower"     then return RT_ALLOC
+    if rname == "grit_trim"         then return RT_ALLOC
+    RT_PANIC
+
+
+fn fixup_pass ctx:CompileCtx rt_len:int -> CompileCtx
+    let code_base = HDR_TOTAL
+    let data_start = code_base + rt_len + len(ctx.code)
+    let mut code = ctx.code
+    let mut i = 0
+    while i + 1 < len(ctx.fixups)
+        let patch_at = match parse_int(ctx.fixups[i])
+            Ok(n) => n
+            Err(_) => 0
+        let label = ctx.fixups[i + 1]
+        let pc = ELF_BASE + HDR_TOTAL + rt_len + patch_at + 4
+        let target = if starts_with(label, "FN:")
+            let fname = label_after_colon(label)
+            let rt_off = rt_func_offset(fname)
+            if rt_off >= 0
+                ELF_BASE + HDR_TOTAL + rt_off
+            else
+                let user_off = fn_table_lookup(ctx.fn_table, fname)
+                if user_off >= 0
+                    ELF_BASE + HDR_TOTAL + rt_len + user_off
+                else
+                    pc
+        else if starts_with(label, "RT:")
+            let rname = label_after_colon(label)
+            let rt_off = rt_name_offset(rname)
+            ELF_BASE + HDR_TOTAL + rt_off
+        else if starts_with(label, "DATA:")
+            let off_str = label_after_colon(label)
+            let doff = match parse_int(off_str)
+                Ok(n) => n
+                Err(_) => 0
+            ELF_BASE + HDR_TOTAL + rt_len + len(ctx.code) + doff
+        else
+            pc
+        let rel = target - pc
+        code = b_patch(code, patch_at, rel)
+        i += 2
+    ctx_set_code(ctx, code)
+
+fn label_after_colon s:str -> str
+    let chars = s.chars()
+    let n = len(chars)
+    let mut i = 0
+    let mut found = false
+    let mut result = ""
+    while i < n
+        let c = to_string(chars[i])
+        if found
+            result = result + c
+        else if c == ":"
+            found = true
+        i += 1
+    result
+
+fn starts_with s:str prefix:str -> bool
+    if len(prefix) > len(s) then return false
+    let sc = s.chars()
+    let pc = prefix.chars()
+    let n = len(pc)
+    let mut i = 0
+    while i < n
+        if sc[i] != pc[i] then return false
+        i += 1
+    true
+
+// ── Main compiler entry ───────────────────────────────────────
+fn compile_to_elf ast:[str] output_path:str
+    let rt = build_runtime()
+    let rt_len = len(rt)
+    let mut ctx = ctx_new()
+    let n_items = len(ast) - 1
+    let mut i = 0
+    while i < n_items
+        let item = ast[i + 1]
+        let ik = ast_kind(item)
+        if ik == "FN"
+            ctx = compile_fn(ctx, item)
+        else if ik == "IMPL_DEF"
+            ctx = compile_impl(ctx, item)
+        i += 1
+    ctx = compile_start(ctx)
+    let start_off = fn_table_lookup(ctx.fn_table, "_start")
+    let entry_va = ELF_BASE + HDR_TOTAL + rt_len + start_off
+    ctx = fixup_pass(ctx, rt_len)
+    elf_write_entry(output_path, rt + ctx.code, ctx.data, entry_va)

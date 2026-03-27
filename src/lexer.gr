@@ -1,0 +1,304 @@
+// ============================================================
+//  GRIT v8 Lexer — written in GRIT, tokenizes GRIT source
+//  Produces: array of [kind, value, line] triples
+//  Token kinds (strings): "INT" "FLOAT" "STR" "IDENT" "KW"
+//    "PLUS" "MINUS" "STAR" "SLASH" "PERCENT" "STARSTAR"
+//    "EQ" "NE" "LT" "LE" "GT" "GE" "AND" "OR" "BANG"
+//    "ASSIGN" "PLUSEQ" "MINUSEQ" "STAREQ" "SLASHEQ" "PERCENTEQ"
+//    "ARROW" "FATARROW" "COLON" "COLONCOLON" "COMMA" "DOT"
+//    "DOTDOT" "DOTDOTEQ" "LPAREN" "RPAREN" "LBRACKET" "RBRACKET"
+//    "LBRACE" "RBRACE" "INDENT" "DEDENT" "NEWLINE" "EOF"
+// ============================================================
+
+fn is_digit c:str -> bool
+    c >= "0" && c <= "9"
+
+fn is_alpha c:str -> bool
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_"
+
+fn is_alnum c:str -> bool
+    is_alpha(c) || is_digit(c)
+
+fn is_kw s:str -> bool
+    match s
+        "fn"       => true
+        "let"      => true
+        "mut"      => true
+        "return"   => true
+        "if"       => true
+        "else"     => true
+        "then"     => true
+        "match"    => true
+        "for"      => true
+        "in"       => true
+        "while"    => true
+        "break"    => true
+        "continue" => true
+        "struct"   => true
+        "enum"     => true
+        "impl"     => true
+        "trait"    => true
+        "true"     => true
+        "false"    => true
+        "pub"      => true
+        "use"      => true
+        "mod"      => true
+        "const"    => true
+        "static"   => true
+        "as"       => true
+        "self"     => true
+        _          => false
+
+// Make a token triple [kind, value, line]
+fn tok kind:str value:str line:int -> [str]
+    [kind, value, to_string(line)]
+
+fn lex src:str -> [[str]]
+    let chars = src.chars()
+    let n = len(chars)
+    let mut i = 0
+    let mut line = 1
+    let mut tokens = []
+    let mut indent_stack = [0]
+    let mut at_line_start = true
+
+    while i < n
+        let c = to_string(chars[i])
+
+        // Indentation handling
+        if at_line_start
+            at_line_start = false
+            let mut col = 0
+            let mut j = i
+            while j < n && (to_string(chars[j]) == " " || to_string(chars[j]) == "\t")
+                if to_string(chars[j]) == "\t"
+                    col += 4
+                else
+                    col += 1
+                j += 1
+
+            // Skip blank lines and comment lines
+            if j >= n || to_string(chars[j]) == "\n" || to_string(chars[j]) == "#"
+                while i < n && to_string(chars[i]) != "\n"
+                    i += 1
+                if i < n
+                    i += 1
+                    line += 1
+                    at_line_start = true
+                continue
+
+            let cur_indent = indent_stack[len(indent_stack) - 1]
+
+            if col > cur_indent
+                indent_stack = push(indent_stack, col)
+                tokens = push(tokens, tok("INDENT", "", line))
+            else
+                let mut still = true
+                while still && len(indent_stack) > 1
+                    let top = indent_stack[len(indent_stack) - 1]
+                    if top > col
+                        indent_stack = pop(indent_stack)
+                        tokens = push(tokens, tok("DEDENT", "", line))
+                    else
+                        still = false
+
+            i = j
+            continue
+
+        // Newline
+        if c == "\n"
+            tokens = push(tokens, tok("NEWLINE", "", line))
+            line += 1
+            i += 1
+            at_line_start = true
+            continue
+
+        // Whitespace
+        if c == " " || c == "\t" || c == "\r"
+            i += 1
+            continue
+
+        // Line comments
+        if c == "#"
+            while i < n && to_string(chars[i]) != "\n"
+                i += 1
+            continue
+
+        if c == "/" && i + 1 < n && to_string(chars[i + 1]) == "/"
+            while i < n && to_string(chars[i]) != "\n"
+                i += 1
+            continue
+
+        // String literals
+        if c == "\"" || c == "'"
+            let quote = c
+            i += 1
+            let mut s = ""
+            while i < n && to_string(chars[i]) != quote
+                let ch = to_string(chars[i])
+                if ch == "\\" && i + 1 < n
+                    i += 1
+                    let esc = to_string(chars[i])
+                    if esc == "n"
+                        s = s + "\n"
+                    else if esc == "t"
+                        s = s + "\t"
+                    else if esc == "r"
+                        s = s + "\r"
+                    else
+                        s = s + esc
+                else
+                    s = s + ch
+                i += 1
+            if i < n
+                i += 1
+            tokens = push(tokens, tok("STR", s, line))
+            continue
+
+        // Numbers
+        if is_digit(c)
+            let mut num = ""
+            let mut is_float = false
+            while i < n && (is_digit(to_string(chars[i])) || to_string(chars[i]) == "_")
+                if to_string(chars[i]) != "_"
+                    num = num + to_string(chars[i])
+                i += 1
+            if i < n && to_string(chars[i]) == "." && i + 1 < n && is_digit(to_string(chars[i + 1]))
+                is_float = true
+                num = num + "."
+                i += 1
+                while i < n && is_digit(to_string(chars[i]))
+                    num = num + to_string(chars[i])
+                    i += 1
+            tokens = if is_float then push(tokens, tok("FLOAT", num, line)) else push(tokens, tok("INT", num, line))
+            continue
+
+        // Identifiers and keywords
+        if is_alpha(c)
+            let mut word = ""
+            while i < n && is_alnum(to_string(chars[i]))
+                word = word + to_string(chars[i])
+                i += 1
+            tokens = if is_kw(word) then push(tokens, tok("KW", word, line)) else push(tokens, tok("IDENT", word, line))
+            continue
+
+        // Two-char operators
+        let nc = if i + 1 < n then to_string(chars[i + 1]) else ""
+
+        if c == "-" && nc == ">"
+            tokens = push(tokens, tok("ARROW", "->", line))
+            i += 2
+            continue
+        if c == "=" && nc == ">"
+            tokens = push(tokens, tok("FATARROW", "=>", line))
+            i += 2
+            continue
+        if c == "=" && nc == "="
+            tokens = push(tokens, tok("EQ", "==", line))
+            i += 2
+            continue
+        if c == "!" && nc == "="
+            tokens = push(tokens, tok("NE", "!=", line))
+            i += 2
+            continue
+        if c == "<" && nc == "="
+            tokens = push(tokens, tok("LE", "<=", line))
+            i += 2
+            continue
+        if c == ">" && nc == "="
+            tokens = push(tokens, tok("GE", ">=", line))
+            i += 2
+            continue
+        if c == "&" && nc == "&"
+            tokens = push(tokens, tok("AND", "&&", line))
+            i += 2
+            continue
+        if c == "|" && nc == "|"
+            tokens = push(tokens, tok("OR", "||", line))
+            i += 2
+            continue
+        if c == ":" && nc == ":"
+            tokens = push(tokens, tok("COLONCOLON", "::", line))
+            i += 2
+            continue
+        if c == "." && nc == "."
+            i += 2
+            let nc2 = if i < n then to_string(chars[i]) else ""
+            if nc2 == "="
+                tokens = push(tokens, tok("DOTDOTEQ", "..=", line))
+                i += 1
+            else
+                tokens = push(tokens, tok("DOTDOT", "..", line))
+            continue
+        if c == "*" && nc == "*"
+            tokens = push(tokens, tok("STARSTAR", "**", line))
+            i += 2
+            continue
+        if c == "+" && nc == "="
+            tokens = push(tokens, tok("PLUSEQ", "+=", line))
+            i += 2
+            continue
+        if c == "-" && nc == "="
+            tokens = push(tokens, tok("MINUSEQ", "-=", line))
+            i += 2
+            continue
+        if c == "*" && nc == "="
+            tokens = push(tokens, tok("STAREQ", "*=", line))
+            i += 2
+            continue
+        if c == "/" && nc == "="
+            tokens = push(tokens, tok("SLASHEQ", "/=", line))
+            i += 2
+            continue
+        if c == "%" && nc == "="
+            tokens = push(tokens, tok("PERCENTEQ", "%=", line))
+            i += 2
+            continue
+
+        // Single-char operators
+        if c == "+"
+            tokens = push(tokens, tok("PLUS", "+", line))
+        else if c == "-"
+            tokens = push(tokens, tok("MINUS", "-", line))
+        else if c == "*"
+            tokens = push(tokens, tok("STAR", "*", line))
+        else if c == "/"
+            tokens = push(tokens, tok("SLASH", "/", line))
+        else if c == "%"
+            tokens = push(tokens, tok("PERCENT", "%", line))
+        else if c == "="
+            tokens = push(tokens, tok("ASSIGN", "=", line))
+        else if c == "<"
+            tokens = push(tokens, tok("LT", "<", line))
+        else if c == ">"
+            tokens = push(tokens, tok("GT", ">", line))
+        else if c == "!"
+            tokens = push(tokens, tok("BANG", "!", line))
+        else if c == ":"
+            tokens = push(tokens, tok("COLON", ":", line))
+        else if c == ","
+            tokens = push(tokens, tok("COMMA", ",", line))
+        else if c == "."
+            tokens = push(tokens, tok("DOT", ".", line))
+        else if c == "("
+            tokens = push(tokens, tok("LPAREN", "(", line))
+        else if c == ")"
+            tokens = push(tokens, tok("RPAREN", ")", line))
+        else if c == "["
+            tokens = push(tokens, tok("LBRACKET", "[", line))
+        else if c == "]"
+            tokens = push(tokens, tok("RBRACKET", "]", line))
+        else if c == "{"
+            tokens = push(tokens, tok("LBRACE", "{", line))
+        else if c == "}"
+            tokens = push(tokens, tok("RBRACE", "}", line))
+        i += 1
+
+    // Close any remaining indent levels
+    let mut still = true
+    while still && len(indent_stack) > 1
+        indent_stack = pop(indent_stack)
+        tokens = push(tokens, tok("DEDENT", "", line))
+
+    tokens = push(tokens, tok("EOF", "", line))
+    tokens

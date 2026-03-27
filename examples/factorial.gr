@@ -1,0 +1,14 @@
+// Factorial using iteration
+fn factorial n:int -> int
+    let mut result = 1
+    let mut i = 1
+    while i <= n
+        result = result * i
+        i += 1
+    result
+
+fn main
+    println(factorial(1))
+    println(factorial(5))
+    println(factorial(10))
+    println(factorial(12))
