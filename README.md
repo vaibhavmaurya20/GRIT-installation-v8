@@ -36,7 +36,7 @@
 | 🚀 **Self-hosting** | The compiler is written in GRIT — 3,235 lines, compiles itself |
 | ⚡ **Zero dependencies** | Compiled binaries use pure Linux syscalls, not libc |
 | 🪶 **Tiny runtime** | Only 500 bytes of runtime code embedded in every binary |
-| 🧠 **Native speed** | x86-64 ELF64 output on par with C and Rust |
+| 🧠 **Native speed** | x86-64 ELF64 output with lightweight native binaries |
 | 📖 **Python-like syntax** | Indentation-based, easy to read and write |
 | ✅ **7/7 self-tests** | Complete test suite built into the compiler |
 
@@ -104,23 +104,13 @@ sudo cp bin/gritc /usr/local/bin/grit
 grit run examples/hello.gr
 ```
 
-**Build from source (requires Rust ≥ 1.70):**
+**No Rust/LLVM/GCC setup required:**
 
 ```bash
-# Install Rust if needed
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-
-# Clone the v7 interpreter source (needed to build gritc)
-git clone https://github.com/vaibhavmaurya20/GRIT-installation
-cd GRIT-installation
-cargo build --release
-
-# The interpreter binary is now at:
-./target/release/grit
-
-# Use it with the v8 bootstrap:
-./target/release/grit run path/to/GRIT-installation-v8/src/bootstrap.gr examples/hello.gr -o hello
+# GRIT v8 ships with a ready-to-run bootstrap binary in this repo.
+# Just keep using the bundled toolchain:
+./run.sh examples/hello.gr
+./build.sh examples/hello.gr -o hello && ./hello
 ```
 
 ---
@@ -675,7 +665,7 @@ file bin/gritc
 # Expected: ELF 64-bit LSB pie executable, x86-64
 
 # If wrong arch, build from source:
-cargo build --release  # requires Rust
+Use the bundled `bin/gritc` from this repository
 ```
 
 ### `Illegal instruction (SIGILL)` when running compiled binary
@@ -687,7 +677,7 @@ See [Architecture](#architecture) for details or open an issue.
 ### Compilation is slow for large files
 
 - Programs under ~300 lines compile in under 1 second
-- Programs over 1000 lines may take 5–30 seconds (the v7 interpreter is unoptimized)
+- Programs over 1000 lines may take longer because bootstrap compilation is compute-heavy
 - Split large programs into smaller files and concatenate them
 
 ### `undefined variable` error
@@ -774,7 +764,7 @@ GitHub: https://github.com/vaibhavmaurya20/GRIT-installation-v8
 - A self-hosting compiler: the compiler source is written in GRIT itself
 - Compiles .gr source files to native x86-64 Linux ELF64 binaries
 - Zero external dependencies: output binaries use only Linux syscalls (no libc, no GCC)
-- The bootstrap interpreter (bin/gritc) is a Rust binary (GRIT v7) that runs .gr files
+- The bootstrap interpreter (`bin/gritc`) is prebuilt and included in this repository
 - The v8 compiler (src/bootstrap.gr, 3235 lines) is the GRIT-written compiler
 
 === HOW TO RUN ANYTHING ===
@@ -893,7 +883,7 @@ CompileCtx is a struct with these fields:
    Mmap syscall: rax=9, rdi=0, rsi=len, rdx=3, r10=0x22, r8=-1, r9=0
 
 2. Self-hosting (compiling bootstrap.gr with itself) is slow
-   Root cause: v7 interpreter parses 117KB bootstrap through a GRIT-written lexer
+   Root cause: bootstrap parsing/execution cost grows with very large source files
    Workaround: Compile smaller files (< 500 lines compile in < 1 second)
 
 === TASK INSTRUCTIONS FOR AI AGENTS ===
