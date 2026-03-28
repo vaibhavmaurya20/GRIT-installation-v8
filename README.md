@@ -23,7 +23,7 @@
 
 **GRIT v8 is a self-hosting compiler** — written entirely in GRIT — that compiles `.gr` source files directly to native **x86-64 Linux ELF64 binaries**. No GCC. No LLVM. No libc. Just pure Linux syscalls.
 
-[Quick Start](#-60-second-quick-start) · [Installation](#-installation) · [Language Guide](#-the-grit-language) · [Examples](#-examples) · [Architecture](#-architecture) · [AI Agent Prompt](#-ai-agent-build-instructions)
+[Quick Start](#-60-second-quick-start) · [Installation](#-installation) · [Language Guide](#-the-grit-language) · [Examples](#-examples) · [Architecture](#-architecture) · [Automation Notes](#-automation-notes)
 
 </div>
 
@@ -745,206 +745,28 @@ GRIT-installation-v8/
 
 ---
 
-## 🤖 AI Agent Build Instructions
+## 🤖 Automation Notes
 
-> **Copy this entire section** as a prompt to Claude, GPT-4, Gemini, or any AI coding agent to build new features, extend GRIT v8, or debug issues.
+For AI agents and automation scripts, keep usage minimal and deterministic:
 
----
+```bash
+# Run interpreted
+./run.sh <program.gr>
 
-### Master Prompt for AI Agents
+# Compile to native Linux ELF64
+./build.sh <program.gr> -o <output>
 
-```
-You are an expert systems programmer working on GRIT v8 — a self-hosting native
-compiler written entirely in the GRIT programming language.
-
-=== REPOSITORY ===
-GitHub: https://github.com/vaibhavmaurya20/GRIT-installation-v8
-
-=== WHAT GRIT v8 IS ===
-- A self-hosting compiler: the compiler source is written in GRIT itself
-- Compiles .gr source files to native x86-64 Linux ELF64 binaries
-- Zero external dependencies: output binaries use only Linux syscalls (no libc, no GCC)
-- The bootstrap interpreter (`bin/gritc`) is prebuilt and included in this repository
-- The v8 compiler (src/bootstrap.gr, 3235 lines) is the GRIT-written compiler
-
-=== HOW TO RUN ANYTHING ===
-# Interpreted (fast dev):
-./bin/gritc run <file.gr>
-./run.sh <file.gr>
-
-# Compile to native ELF64:
-./bin/gritc run src/bootstrap.gr <file.gr> -o <output>
-./build.sh <file.gr> -o <output>
-
-# Verify all 7 tests pass:
+# Validate toolchain
 ./build.sh --self-test
-
-=== GRIT LANGUAGE SYNTAX ===
-fn function_name param:type -> return_type
-    body_indented_4_spaces
-
-let x = 42              # immutable variable
-let mut y = 0           # mutable variable
-y += 1                  # compound assignment
-
-if condition
-    body
-else if other
-    body
-else
-    body
-
-if cond then val1 else val2    # inline ternary
-
-while condition
-    body
-
-fn inline x:int -> int => x * 2    # arrow syntax for one-liners
-
-struct MyStruct
-    field1: int
-    field2: str
-
-let s = MyStruct { field1: 42, field2: "hello" }
-println(s.field1)
-
-TYPES: int (64-bit), str, bool, [T] (array), [[T]] (nested array)
-BUILTINS: println, print, to_string, len, push, append, read_file, write_file, args
-
-=== COMPILER SOURCE MODULES ===
-src/lexer.gr          → tokenizer (text → tokens)
-src/parser.gr         → Pratt parser (tokens → AST as nested [str] arrays)
-src/codegen_native.gr → x86-64 code generator (AST → machine bytes)
-src/elf64.gr          → ELF64 binary writer
-src/x86_64.gr         → x86-64 instruction encoder
-src/runtime.gr        → 500-byte embedded runtime (grit_alloc, grit_println_i, etc.)
-src/bytes.gr          → byte encoding utilities
-src/grit8.gr          → compiler driver, CLI, self-test
-src/bootstrap.gr      → ALL of the above concatenated into one file
-
-=== AST FORMAT ===
-The parser produces nested arrays of strings:
-["FN", name, params, body]
-["LET", name, type, expr]
-["IF", cond, then_body, else_body]
-["WHILE", cond, body]
-["CALL", fn_name, args_array]
-["BIN", operator, lhs, rhs]
-["VAR", name]
-["INT", value_str]
-["STR", value_str]
-["BOOL", "true"|"false"]
-["RETURN", expr]
-["BLOCK", stmt1, stmt2, ...]
-["ASSIGN", target, value]
-["INDEX", array, index]
-["FIELD", struct_expr, field_name]
-
-=== ELF64 MEMORY LAYOUT ===
-Base VA: 0x400000
-[ELF header: 64 bytes at 0x400000]
-[Program header: 56 bytes at 0x400040]
-[Runtime: 500 bytes at 0x400078]   ← grit_write, grit_alloc, grit_println_*, etc.
-[User code: variable at 0x400264+] ← compiled user functions + _start entry
-[Data section: after code]         ← string literals
-
-=== RUNTIME OFFSETS (from runtime start) ===
-RT_WRITE     = 0    → grit_write(rdi=ptr, rsi=len)
-RT_STRLEN    = 26   → grit_strlen(rdi=ptr) → rax=len
-RT_ITOA      = 43   → grit_itoa(rdi=n, rsi=buf) → rax=len
-RT_PRINTLN_I = 200  → grit_println_i(rdi=int)
-RT_PRINTLN_S = 250  → grit_println_s(rdi=ptr, rsi=len)
-RT_PRINTLN_B = 320  → grit_println_b(rdi=bool)
-RT_ALLOC     = 380  → grit_alloc(rdi=size) → rax=ptr
-RT_PANIC     = 430  → grit_panic(rdi=ptr, rsi=len) → exit(1)
-
-=== CALLING CONVENTION (System V AMD64) ===
-Arguments: RDI, RSI, RDX, RCX, R8, R9
-Return value: RAX
-Stack: must be 16-byte aligned before CALL
-Frame: push rbp; mov rbp,rsp; sub rsp,N; ... mov rsp,rbp; pop rbp; ret
-
-=== COMPILE CTX STRUCTURE ===
-CompileCtx is a struct with these fields:
-  code: [int]       ← emitted machine code bytes
-  data: [int]       ← string literals data section
-  data_offset: int  ← current data section write position
-  fixups: [str]     ← [pos, label, pos, label, ...] relocation records
-  fn_table: [str]   ← [name, offset, name, offset, ...] function locations
-  locals: [str]     ← local variable name list for current function
-  label_cnt: int    ← counter for generating unique jump labels
-  frame_size: int   ← current function's stack frame size in bytes
-  str_pool: [str]   ← [text, offset, text, offset, ...] string dedup pool
-
-=== KNOWN ISSUES (as of v8.0.0) ===
-1. Array literals and indexing can fail with SIGILL on some systems
-   Root cause: grit_alloc uses brk() syscall which fails on pure static ELF
-   Fix: Replace brk with mmap in src/runtime.gr grit_alloc function
-   Mmap syscall: rax=9, rdi=0, rsi=len, rdx=3, r10=0x22, r8=-1, r9=0
-
-2. Self-hosting (compiling bootstrap.gr with itself) is slow
-   Root cause: bootstrap parsing/execution cost grows with very large source files
-   Workaround: Compile smaller files (< 500 lines compile in < 1 second)
-
-=== TASK INSTRUCTIONS FOR AI AGENTS ===
-When asked to extend or fix GRIT v8:
-
-1. READ the relevant source file in src/ before making changes
-2. TEST with: ./build.sh --self-test (all 7 must pass after your change)
-3. TEST the specific feature: ./run.sh your_test.gr
-4. COMPILE to binary to verify: ./build.sh your_test.gr -o test_bin && ./test_bin
-5. CHECK: binary exit code must be 0, output must match expected
-
-When writing new GRIT code (for tests or examples):
-- Use 4-space indentation (never tabs)
-- All function parameters need explicit types: fn f x:int -> int
-- Use let mut for mutable variables
-- The last expression in a function is the return value (no explicit return needed at end)
-- Use return only for early exits
-
-When modifying compiler source (src/*.gr):
-- After changing runtime.gr, rebuild bootstrap: cat src/bytes.gr src/elf64.gr src/x86_64.gr src/runtime.gr src/lexer.gr src/parser.gr src/codegen_native.gr src/grit8.gr > src/bootstrap.gr
-- Then run: ./build.sh --self-test
-- All 7 tests must pass
-
-=== EXAMPLE TASKS FOR AI AGENTS ===
-- "Add a new built-in function sqrt() to the compiler"
-- "Fix the array indexing SIGILL bug by changing grit_alloc to use mmap"
-- "Add a for-in loop to the parser and codegen"
-- "Add string slicing support: s[0:3]"
-- "Write a program that reads a file and counts words"
-- "Add macOS cross-compilation support via Docker"
-- "Extend the self-test to include array operations"
-- "Profile and optimize the lexer for large files"
 ```
 
----
+Recommended workflow:
+1. Edit only the relevant `src/*.gr` module.
+2. Rebuild `src/bootstrap.gr` when compiler modules change.
+3. Run `./build.sh --self-test` (all 7 tests should pass).
+4. Verify with a focused example program.
 
-### Quick Agent Prompts by Task
-
-**Fix the array SIGILL bug:**
-```
-Using the GRIT v8 repository context above, fix the grit_alloc function in
-src/runtime.gr to use mmap (syscall 9) instead of brk (syscall 12).
-The mmap call should be: mmap(NULL, size, PROT_READ|PROT_WRITE,
-MAP_PRIVATE|MAP_ANONYMOUS, -1, 0). After fixing, rebuild bootstrap.gr
-and verify all 7 self-tests pass.
-```
-
-**Add a new built-in function:**
-```
-Using the GRIT v8 repository context above, add a built-in function
-`min(a:int, b:int) -> int` that returns the smaller of two integers.
-Add it to codegen_native.gr in the cg_call_expr function, add the
-runtime stub if needed, rebuild bootstrap, and verify with a test program.
-```
-
-**Write a new example program:**
-```
-Using the GRIT v8 repository context above, write a GRIT v8 program
-that implements bubble sort on an array of integers, compile it with
-./build.sh, and verify the output is correctly sorted.
-```
+This repository already includes the bootstrap binary (`bin/gritc`), so normal usage does not require external compiler toolchains.
 
 ---
 
