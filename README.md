@@ -1,409 +1,440 @@
-# GRIT v8 — Self-Hosting Native Compiler
+<div align="center">
+
+# GRIT v8
 
 **General Runtime Intelligence Technology**
-*One language. Zero dependencies. Native speed.*
 
-GRIT v8 is a **self-hosting compiler** written entirely in GRIT that compiles GRIT source code directly to native **x86_64 Linux ELF64 binaries** — no GCC, no LLVM, no C runtime, no libc. Just pure Linux syscalls.
+*Self-hosting compiler + interpreter for `.gr` programs.*
+
+[![Tests](https://img.shields.io/badge/self--tests-7%2F7%20passing-brightgreen?style=flat-square)](https://github.com/vaibhavmaurya20/GRIT-installation-v8)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![Target](https://img.shields.io/badge/native%20target-Linux%20x86__64-blue?style=flat-square)](#compile-to-native-linux-binaries)
+[![Platforms](https://img.shields.io/badge/host-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square)](#installation)
+
+```grit
+fn fib n:int -> int
+    if n <= 1 then n else fib(n-1) + fib(n-2)
+
+fn main
+    println(fib(10))   // 55
+```
+
+</div>
 
 ---
 
-## What's Included
+## Table of Contents
 
-```
-grit-v8/
-├── README.md               ← This file
-├── src/                    ← GRIT v8 compiler source (all in GRIT)
-│   ├── bootstrap.gr        ← Complete combined single-file compiler (3235 lines)
-│   ├── bytes.gr            ← Byte manipulation utilities (little-endian encoding)
-│   ├── elf64.gr            ← ELF64 binary writer
-│   ├── x86_64.gr           ← x86_64 instruction encoder
-│   ├── runtime.gr          ← Linux syscall runtime (no libc)
-│   ├── lexer.gr            ← GRIT tokenizer
-│   ├── parser.gr           ← Pratt parser → AST
-│   ├── codegen_native.gr   ← AST → native x86_64 machine code
-│   └── grit8.gr            ← Compiler driver (main, self-test, CLI)
-├── examples/               ← Ready-to-compile GRIT programs
-│   ├── hello.gr
-│   ├── fibonacci.gr
-│   ├── fizzbuzz.gr
-│   ├── factorial.gr
-│   ├── primes.gr
-│   ├── gcd.gr
-│   └── power.gr
-└── bin/
-    ├── gritc               ← Bootstrap interpreter (runs .gr files)
-    └── fibonacci_demo      ← Pre-built native demo binary
-```
+- [What is GRIT?](#what-is-grit)
+- [Installation](#installation)
+  - [Linux (fastest path)](#linux-fastest-path)
+  - [macOS (Docker)](#macos-docker)
+  - [Windows (WSL recommended)](#windows-wsl-recommended)
+- [Verify Installation](#verify-installation)
+- [Quick Start](#quick-start)
+- [Compile to Native Linux Binaries](#compile-to-native-linux-binaries)
+- [VS Code Setup](#vs-code-setup)
+- [Other IDEs](#other-ides)
+- [AI Agent & LLM Integration](#ai-agent--llm-integration)
+- [Language Snapshot](#language-snapshot)
+- [Project Layout](#project-layout)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## Quick Start
+## What is GRIT?
 
-### Run a GRIT program immediately (no compilation step):
-```bash
-./bin/gritc run examples/hello.gr
-./bin/gritc run examples/fibonacci.gr
-```
+GRIT v8 is a **self-hosting language toolchain**. The compiler source is written in GRIT and can compile `.gr` programs to **Linux x86-64 ELF64 binaries**.
 
-### Compile to a native binary:
-```bash
-./bin/gritc run src/bootstrap.gr examples/hello.gr -o hello
-./hello
-# → Hello, GRIT!
-```
+- ✅ No LLVM/GCC dependency for GRIT-generated binaries.
+- ✅ Includes interpreter workflow (`run.sh`) and compile workflow (`build.sh`).
+- ✅ Built-in self-test suite (`7/7 passing` in this repo).
 
-### Compile fibonacci to native binary:
-```bash
-./bin/gritc run src/bootstrap.gr examples/fibonacci.gr -o fib
-./fib
-# → 0 1 1 2 3 5 8 13 21 34 55
-```
+> **Important compatibility note:** native compiled output is currently **Linux ELF64**. On macOS/Windows, use Docker/WSL for compilation and binary execution.
 
 ---
 
 ## Installation
 
-### Prerequisites
-- Linux x86_64 (Ubuntu 20.04+, Debian 11+, or similar)
-- No other dependencies required
+### Linux (fastest path)
 
-### Option 1: Use the included bootstrap interpreter
-The `bin/gritc` binary is the GRIT v7 bootstrap interpreter.
-It can both run `.gr` files directly and compile them via the v8 compiler:
+#### Option A — one command (global `grit` in `/usr/local/bin`)
 
 ```bash
-# Make executable
-chmod +x bin/gritc
-
-# Run any .gr file:
-./bin/gritc run examples/fibonacci.gr
-
-# Compile to native binary:
-./bin/gritc run src/bootstrap.gr <source.gr> -o <output>
+sudo curl -fsSL https://raw.githubusercontent.com/vaibhavmaurya20/GRIT-installation-v8/main/bin/gritc -o /usr/local/bin/grit && sudo chmod +x /usr/local/bin/grit && grit --version
 ```
 
-### Option 2: Build from source (requires Rust)
+#### Option B — no sudo (user-local)
+
 ```bash
-# Clone and build the interpreter
-git clone <repo>
-cd grit
-cargo build --release
-./target/release/grit run src/bootstrap.gr examples/hello.gr -o hello
+mkdir -p "$HOME/.local/bin" && curl -fsSL https://raw.githubusercontent.com/vaibhavmaurya20/GRIT-installation-v8/main/bin/gritc -o "$HOME/.local/bin/grit" && chmod +x "$HOME/.local/bin/grit" && echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc" && export PATH="$HOME/.local/bin:$PATH" && grit --version
 ```
 
-### System-wide install
+#### Option C — full repo clone (recommended for development)
+
 ```bash
-sudo cp bin/gritc /usr/local/bin/grit
-# Now use:
-grit run examples/hello.gr
-grit run src/bootstrap.gr myprogram.gr -o myprogram
+git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && cd ~/grit && chmod +x bin/gritc run.sh build.sh && sudo ln -sf ~/grit/bin/gritc /usr/local/bin/grit && grit --version
 ```
 
 ---
 
-## The GRIT Language
+### macOS (Docker)
 
-GRIT uses **indentation-based syntax** (like Python) with static types and functional features.
+`bin/gritc` is a Linux ELF executable. Use Docker on macOS for a seamless setup:
 
-### Hello World
-```grit
-fn main
-    println("Hello, GRIT!")
+```bash
+brew install --cask docker && open -a Docker && mkdir -p "$HOME/grit" && git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git "$HOME/grit" && alias grit='docker run --rm -v "$PWD":/workspace -v "$HOME/grit":/grit ubuntu:22.04 bash -lc "/grit/bin/gritc $*"' && echo 'alias grit="docker run --rm -v "$PWD":/workspace -v "$HOME/grit":/grit ubuntu:22.04 bash -lc \"/grit/bin/gritc \$*\""' >> ~/.zshrc
 ```
 
-### Functions
+Then open a new terminal and run:
+
+```bash
+grit --version
+```
+
+> If Docker Desktop is already installed, skip the `brew install --cask docker` step.
+
+---
+
+### Windows (WSL recommended)
+
+#### Option A — WSL Ubuntu (recommended)
+
+In **PowerShell (Admin)**:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Then inside Ubuntu:
+
+```bash
+git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && cd ~/grit && chmod +x bin/gritc run.sh build.sh && sudo ln -sf ~/grit/bin/gritc /usr/local/bin/grit && grit --version
+```
+
+#### Option B — Docker Desktop
+
+```powershell
+docker run --rm -it -v ${PWD}:/workspace ubuntu:22.04 bash -lc "apt-get update -qq && apt-get install -y git -qq && git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git /grit && /grit/bin/gritc --version"
+```
+
+---
+
+## Verify Installation
+
+Run these checks after installation:
+
+```bash
+grit --version
+grit run src/bootstrap.gr --self-test
+grit run examples/hello.gr
+grit run src/bootstrap.gr examples/fibonacci.gr -o fib && ./fib
+```
+
+Expected outcomes:
+- `--version` prints a version string.
+- Self-test ends with `=== Tests complete ===` and all checks pass.
+- `examples/hello.gr` prints `Hello, GRIT!`.
+- Fibonacci binary prints numbers through `55`.
+
+---
+
+## Quick Start
+
+Create `hello.gr`:
+
+```grit
+fn main
+    println("Hello, GRIT v8!")
+```
+
+Run (interpreted):
+
+```bash
+grit run hello.gr
+```
+
+Compile (Linux):
+
+```bash
+grit run src/bootstrap.gr hello.gr -o hello
+./hello
+```
+
+Using helper scripts from this repo:
+
+```bash
+./run.sh hello.gr
+./build.sh hello.gr -o hello && ./hello
+```
+
+---
+
+## Compile to Native Linux Binaries
+
+Core command:
+
+```bash
+grit run src/bootstrap.gr <program.gr> -o <output>
+```
+
+Examples:
+
+```bash
+grit run src/bootstrap.gr examples/fizzbuzz.gr -o fizzbuzz && ./fizzbuzz
+grit run src/bootstrap.gr examples/primes.gr -o primes && ./primes
+grit run src/bootstrap.gr examples/factorial.gr -o factorial && ./factorial
+grit run src/bootstrap.gr examples/gcd.gr -o gcd && ./gcd
+```
+
+Makefile shortcuts:
+
+```bash
+make test
+make examples
+```
+
+---
+
+## VS Code Setup
+
+Create `.vscode/tasks.json`:
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "GRIT: Run current file",
+      "type": "shell",
+      "command": "grit run ${file}",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "GRIT: Compile current file (Linux)",
+      "type": "shell",
+      "command": "grit run src/bootstrap.gr ${file} -o ${fileDirname}/${fileBasenameNoExtension} && ${fileDirname}/${fileBasenameNoExtension}",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "GRIT: Self-test",
+      "type": "shell",
+      "command": "grit run src/bootstrap.gr --self-test",
+      "group": "test",
+      "problemMatcher": []
+    }
+  ]
+}
+```
+
+Recommended `settings.json` snippet:
+
+```json
+{
+  "files.associations": {
+    "*.gr": "python"
+  },
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true
+}
+```
+
+---
+
+## Other IDEs
+
+### JetBrains (IntelliJ, CLion, PyCharm)
+
+Create a Shell Script run configuration:
+- Program: `grit`
+- Args (run): `run $FilePath$`
+- Args (compile): `run src/bootstrap.gr $FilePath$ -o /tmp/grit_out && /tmp/grit_out`
+
+### Neovim (example mappings)
+
+```lua
+vim.keymap.set('n', '<F5>', function()
+  vim.cmd('terminal grit run ' .. vim.fn.expand('%:p'))
+end)
+
+vim.keymap.set('n', '<F6>', function()
+  local f = vim.fn.expand('%:p')
+  local o = vim.fn.expand('%:p:r')
+  vim.cmd('terminal grit run src/bootstrap.gr ' .. f .. ' -o ' .. o .. ' && ' .. o)
+end)
+
+vim.filetype.add({ extension = { gr = 'python' } })
+```
+
+---
+
+## AI Agent & LLM Integration
+
+GRIT works well as a tool in coding agents and workflow automation.
+
+### Minimal JSON tool contract
+
+```json
+{
+  "name": "grit_run",
+  "description": "Execute GRIT source and return stdout/stderr/exit status.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "code": { "type": "string", "description": "Full GRIT source containing fn main" }
+    },
+    "required": ["code"]
+  }
+}
+```
+
+### Python executor example
+
+```python
+import os
+import subprocess
+import tempfile
+
+
+def grit_run(code: str) -> dict:
+    with tempfile.NamedTemporaryFile(suffix='.gr', mode='w', delete=False) as f:
+        f.write(code)
+        path = f.name
+    try:
+        r = subprocess.run(['grit', 'run', path], capture_output=True, text=True, timeout=30)
+        return {
+            'stdout': r.stdout,
+            'stderr': r.stderr,
+            'exit_code': r.returncode,
+            'success': r.returncode == 0,
+        }
+    finally:
+        os.unlink(path)
+```
+
+### OpenAI function-calling shape
+
+```python
+tools = [{
+  "type": "function",
+  "function": {
+    "name": "execute_grit",
+    "description": "Run GRIT code and return output",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source_code": {"type": "string"},
+        "mode": {"type": "string", "enum": ["interpret", "compile"]}
+      },
+      "required": ["source_code"]
+    }
+  }
+}]
+```
+
+---
+
+## Language Snapshot
+
+### Core syntax
+
 ```grit
 fn add a:int b:int -> int
     a + b
 
-fn greet name:str -> str
-    "Hello, " + name + "!"
-
-fn main
-    println(add(3, 4))      // → 7
-    println(greet("World")) // → Hello, World!
-```
-
-### Variables
-```grit
-fn main
-    let x = 42              // immutable
-    let mut count = 0       // mutable
-    count += 1
-    println(x)              // → 42
-    println(count)          // → 1
-```
-
-### Conditionals
-```grit
-fn classify n:int -> int
-    if n < 0
-        println("negative")
-    else if n == 0
-        println("zero")
-    else
-        println("positive")
-    n
-
-// Inline form:
-fn max a:int b:int -> int
-    if a > b then a else b
-```
-
-### Loops
-```grit
 fn main
     let mut i = 0
-    while i < 5
-        println(i)
+    while i < 3
+        println(add(i, 10))
         i += 1
-
-fn sum_to n:int -> int
-    let mut s = 0
-    let mut i = 1
-    while i <= n
-        s += i
-        i += 1
-    s
 ```
 
-### Recursion
-```grit
-fn fib n:int -> int
-    if n <= 1 then n else fib(n-1) + fib(n-2)
+### Built-ins you will use often
 
-fn factorial n:int -> int
-    if n <= 1 then 1 else n * factorial(n-1)
-```
+- `println(x)` / `print(x)`
+- `len(arr_or_string)`
+- `to_string(x)`
+- `push(arr, value)`
+- `append(a, b)`
+- `args()`
 
-### Multiple functions
-```grit
-fn is_prime n:int -> int
-    if n < 2
-        return 0
-    let mut i = 2
-    while i * i <= n
-        if n % i == 0
-            return 0
-        i += 1
-    1
-
-fn main
-    if is_prime(97)
-        println("97 is prime")
-```
-
-### Boolean expressions
-```grit
-fn main
-    println(true)           // → true
-    println(false)          // → false
-    println(3 > 2)          // → true
-    println(5 == 5)         // → true
-    println(4 != 3)         // → true
-    println(10 <= 10)       // → true
-```
+See `docs/LANGUAGE_SPEC.md` for fuller details.
 
 ---
 
-## Language Reference
+## Project Layout
 
-### Types
-| Type | Description | Example |
-|------|-------------|---------|
-| `int` | 64-bit signed integer | `42`, `-17`, `0` |
-| `str` | UTF-8 string | `"hello"` |
-| `bool` | Boolean | `true`, `false` |
-| `[T]` | Array of T | `[1, 2, 3]` |
-| `[[T]]` | Nested array | `[["a","b"], ["c"]]` |
-
-### Operators
-| Category | Operators |
-|----------|-----------|
-| Arithmetic | `+`, `-`, `*`, `/`, `%` |
-| Comparison | `==`, `!=`, `<`, `<=`, `>`, `>=` |
-| Assignment | `=`, `+=`, `-=`, `*=`, `/=`, `%=` |
-| Boolean | `&&`, `\|\|`, `!` |
-
-### Built-in Functions
-| Function | Description |
-|----------|-------------|
-| `println(x)` | Print value + newline |
-| `print(x)` | Print without newline |
-| `to_string(x)` | Convert to string |
-| `len(arr)` | Array length |
-| `push(arr, x)` | Append to array |
-| `append(a, b)` | Concatenate arrays |
-| `read_file(path)` | Read file → Ok(str)/Err(str) |
-| `write_file(path, s)` | Write string to file |
-| `args()` | Command-line args as [str] |
-
----
-
-## Compiler Usage
-
+```text
+bin/gritc             Prebuilt GRIT executable
+src/bootstrap.gr      Combined compiler pipeline
+src/lexer.gr          Lexer
+src/parser.gr         Parser
+src/codegen_native.gr Native code generator
+src/runtime.gr        Minimal syscall runtime
+src/elf64.gr          ELF writer
+examples/*.gr         Example programs
+run.sh                Interpreter helper
+build.sh              Native compile helper
+Makefile              test/examples automation
 ```
-USAGE:
-  gritc run src/bootstrap.gr <source.gr> [options]
-
-OPTIONS:
-  -o <output>        Output binary path (default: a.out)
-  -v, --verbose      Show compilation steps
-  --version          Show GRIT version
-  --help             Show help
-  --self-test        Run built-in test suite
-
-EXAMPLES:
-  # Compile and run
-  gritc run src/bootstrap.gr hello.gr -o hello && ./hello
-
-  # Compile with verbose output
-  gritc run src/bootstrap.gr fibonacci.gr -o fib -v
-
-  # Run self-test suite (7 tests)
-  gritc run src/bootstrap.gr --self-test
-```
-
----
-
-## Architecture
-
-GRIT v8 compiles in 4 passes:
-
-```
-Source (.gr)
-    │
-    ▼ [1] Lexer (lexer.gr)
-Tokens
-    │
-    ▼ [2] Parser (parser.gr)  
-AST (nested [str] arrays)
-    │
-    ▼ [3] Code Generator (codegen_native.gr)
-x86_64 machine code + data section + fixup table
-    │
-    ▼ [4] ELF Builder (elf64.gr)
-Native ELF64 binary (runnable on Linux x86_64)
-```
-
-### ELF64 Layout
-```
-[ELF header: 64 bytes]
-[Program header: 56 bytes]
-[Runtime: 500 bytes]     ← pure syscall routines, no libc
-[User code: variable]    ← compiled user functions + _start
-[Data section: variable] ← string literals
-```
-
-### Runtime Functions (offset from runtime start)
-| Offset | Function | Description |
-|--------|----------|-------------|
-| 0 | grit_write | sys_write wrapper |
-| 26 | grit_strlen | string length |
-| 43 | grit_itoa | integer → ASCII |
-| 200 | grit_println_i | print integer + newline |
-| 250 | grit_println_s | print string + newline |
-| 320 | grit_println_b | print bool + newline |
-| 380 | grit_alloc | heap allocator (brk syscall) |
-| 430 | grit_panic | print error + exit(1) |
-
----
-
-## Self-Test
-
-Run the built-in test suite to verify everything works:
-
-```bash
-./bin/gritc run src/bootstrap.gr --self-test
-```
-
-Expected output:
-```
-=== GRIT v8 Self-Test Suite ===
-
-[ 1 ] Lexer
-      PASS — 18 tokens
-[ 2 ] Parser
-      PASS — AST root = MODULE, 1 items
-[ 3 ] Byte utils
-      PASS — little-endian correct
-[ 4 ] x86_64 encoder
-      PASS — RET = 0xC3
-      PASS — PUSH RAX = 0x50
-[ 5 ] ELF64 header builder
-      PASS — ELF magic correct
-[ 6 ] Compile hello world → ELF
-  ✓ 711 bytes → /tmp/hello_v8_test
-      PASS — binary runs! Output: Hello from GRIT v8!
-[ 7 ] Compile fibonacci → ELF
-  ✓ 893 bytes → /tmp/fib_v8
-      PASS — fib(0)=0, fib(10)=55
-
-=== Tests complete ===
-```
-
----
-
-## Building Your First Program
-
-1. Create `myprogram.gr`:
-```grit
-fn greet name:str -> int
-    println("Hello, " + name + "!")
-    0
-
-fn main
-    greet("World")
-    greet("GRIT")
-    let result = 1 + 2 + 3 + 4 + 5
-    println(result)
-```
-
-2. Compile to native binary:
-```bash
-./bin/gritc run src/bootstrap.gr myprogram.gr -o myprogram
-```
-
-3. Run it:
-```bash
-./myprogram
-# Hello, World!
-# Hello, GRIT!
-# 15
-```
-
----
-
-## Version Info
-
-- **GRIT v8.0.0** — Complete Self-Hosting Compiler
-- **Target**: Linux x86_64 ELF64
-- **Runtime**: 500 bytes of pure syscall stubs (no libc)
-- **Bootstrap**: Written entirely in GRIT
-- **License**: MIT
 
 ---
 
 ## Troubleshooting
 
-**"Permission denied" when running binary**
+### `grit: command not found`
+
 ```bash
+which grit
+ls -la /usr/local/bin/grit
+```
+
+If missing:
+
+```bash
+sudo ln -sf ~/grit/bin/gritc /usr/local/bin/grit
+```
+
+### `Permission denied`
+
+```bash
+chmod +x bin/gritc
 chmod +x ./myprogram
 ```
 
-**"Exec format error"**
-- Ensure you're on Linux x86_64
-- The binary is 64-bit ELF — won't run on 32-bit or ARM
+### `Exec format error`
 
-**Segmentation fault**
-- Check that your recursive functions have proper base cases
-- Deeply nested recursion may exhaust the stack
+You are trying to run a Linux ELF binary on a non-Linux host. Use WSL/Docker (or run interpreted mode if supported in your environment).
 
-**Compilation is slow for large files**
-- The bootstrap compiler runs through the v7 interpreter which is interpreted
-- Programs under ~500 lines compile in under 1 second
-- For larger programs, split into multiple source files
+### Self-test fails
 
-**"undefined variable" errors**
-- All variables must be declared with `let` before use
-- Mutable variables need `let mut`
+Run from repository root and verify paths:
+
+```bash
+pwd
+./bin/gritc run src/bootstrap.gr --self-test
+```
+
+---
+
+## Contributing
+
+```bash
+git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git
+cd GRIT-installation-v8
+./bin/gritc run src/bootstrap.gr --self-test
+```
+
+When editing compiler modules, rebuild `src/bootstrap.gr` by concatenating module files in the project order used by this repo.
+
+---
+
+<div align="center">
+
+**GRIT v8** · MIT Licensed · Linux-native compiler target
+
+[github.com/vaibhavmaurya20/GRIT-installation-v8](https://github.com/vaibhavmaurya20/GRIT-installation-v8)
+
+</div>
