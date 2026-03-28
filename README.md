@@ -206,6 +206,8 @@ Expected:
 - `examples/hello.gr` prints `Hello, GRIT!`,
 - fibonacci prints through `55`.
 
+> Note: version checks should report the current GRIT v8.0 release (`./bin/gritc --version` and `./build.sh --version`).
+
 ---
 
 ## 🔧 Compiler Usage
