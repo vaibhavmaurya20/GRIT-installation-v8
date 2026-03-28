@@ -61,19 +61,25 @@ GRIT v8 is a **self-hosting language toolchain**. The compiler source is written
 #### Option A — one command (global `grit` in `/usr/local/bin`)
 
 ```bash
-sudo curl -fsSL https://raw.githubusercontent.com/vaibhavmaurya20/GRIT-installation-v8/main/bin/gritc -o /usr/local/bin/grit && sudo chmod +x /usr/local/bin/grit && grit --version
+sudo curl -fL https://raw.githubusercontent.com/vaibhavmaurya20/GRIT-installation-v8/main/bin/gritc -o /usr/local/bin/grit && sudo chmod +x /usr/local/bin/grit && /usr/local/bin/grit --version
 ```
 
 #### Option B — no sudo (user-local)
 
 ```bash
-mkdir -p "$HOME/.local/bin" && curl -fsSL https://raw.githubusercontent.com/vaibhavmaurya20/GRIT-installation-v8/main/bin/gritc -o "$HOME/.local/bin/grit" && chmod +x "$HOME/.local/bin/grit" && echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc" && export PATH="$HOME/.local/bin:$PATH" && grit --version
+mkdir -p "$HOME/.local/bin" && \
+curl -fL https://raw.githubusercontent.com/vaibhavmaurya20/GRIT-installation-v8/main/bin/gritc -o "$HOME/.local/bin/grit" && \
+chmod +x "$HOME/.local/bin/grit" && \
+touch "$HOME/.bashrc" && \
+(grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc") && \
+export PATH="$HOME/.local/bin:$PATH" && \
+grit --version
 ```
 
 #### Option C — full repo clone (recommended for development)
 
 ```bash
-git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && cd ~/grit && chmod +x bin/gritc run.sh build.sh && sudo ln -sf ~/grit/bin/gritc /usr/local/bin/grit && grit --version
+git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && cd ~/grit && chmod +x bin/gritc run.sh build.sh && sudo ln -sf "$PWD/bin/gritc" /usr/local/bin/grit && grit --version
 ```
 
 ---
@@ -83,7 +89,17 @@ git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && 
 `bin/gritc` is a Linux ELF executable. Use Docker on macOS for a seamless setup:
 
 ```bash
-brew install --cask docker && open -a Docker && mkdir -p "$HOME/grit" && git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git "$HOME/grit" && alias grit='docker run --rm -v "$PWD":/workspace -v "$HOME/grit":/grit ubuntu:22.04 bash -lc "/grit/bin/gritc $*"' && echo 'alias grit="docker run --rm -v "$PWD":/workspace -v "$HOME/grit":/grit ubuntu:22.04 bash -lc \"/grit/bin/gritc \$*\""' >> ~/.zshrc
+brew install --cask docker && open -a Docker
+
+git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git "$HOME/grit"
+
+cat >> ~/.zshrc <<'EOF'
+grit() {
+  docker run --rm -v "$PWD":/workspace -w /workspace -v "$HOME/grit":/grit ubuntu:22.04 /grit/bin/gritc "$@"
+}
+EOF
+
+source ~/.zshrc && grit --version
 ```
 
 Then open a new terminal and run:
@@ -109,7 +125,7 @@ wsl --install -d Ubuntu
 Then inside Ubuntu:
 
 ```bash
-git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && cd ~/grit && chmod +x bin/gritc run.sh build.sh && sudo ln -sf ~/grit/bin/gritc /usr/local/bin/grit && grit --version
+git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && cd ~/grit && chmod +x bin/gritc run.sh build.sh && sudo ln -sf "$PWD/bin/gritc" /usr/local/bin/grit && grit --version
 ```
 
 #### Option B — Docker Desktop
@@ -126,6 +142,7 @@ Run these checks after installation:
 
 ```bash
 grit --version
+git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8.git ~/grit && cd ~/grit
 grit run src/bootstrap.gr --self-test
 grit run examples/hello.gr
 grit run src/bootstrap.gr examples/fibonacci.gr -o fib && ./fib
@@ -133,7 +150,7 @@ grit run src/bootstrap.gr examples/fibonacci.gr -o fib && ./fib
 
 Expected outcomes:
 - `--version` prints a version string.
-- Self-test ends with `=== Tests complete ===` and all checks pass.
+- Self-test ends with `=== Tests complete ===` and all checks pass (currently 7/7).
 - `examples/hello.gr` prints `Hello, GRIT!`.
 - Fibonacci binary prints numbers through `55`.
 
@@ -148,33 +165,35 @@ fn main
     println("Hello, GRIT v8!")
 ```
 
-Run (interpreted):
+Run (interpreted, works from any directory):
 
 ```bash
 grit run hello.gr
 ```
 
-Compile (Linux):
+Compile to native Linux binary (requires `src/bootstrap.gr`, so run from repo root):
 
 ```bash
-grit run src/bootstrap.gr hello.gr -o hello
-./hello
+cd ~/grit
+grit run src/bootstrap.gr /path/to/hello.gr -o /tmp/hello
+/tmp/hello
 ```
 
 Using helper scripts from this repo:
 
 ```bash
-./run.sh hello.gr
-./build.sh hello.gr -o hello && ./hello
+./run.sh /path/to/hello.gr
+./build.sh /path/to/hello.gr -o /tmp/hello && /tmp/hello
 ```
 
 ---
 
 ## Compile to Native Linux Binaries
 
-Core command:
+Core command (run from the GRIT repo root so `src/bootstrap.gr` resolves):
 
 ```bash
+cd ~/grit
 grit run src/bootstrap.gr <program.gr> -o <output>
 ```
 
