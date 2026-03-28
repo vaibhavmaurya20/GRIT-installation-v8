@@ -15,16 +15,39 @@
 
 [![Tests](https://img.shields.io/badge/tests-7%2F7%20passing-00FF88?style=flat-square)](https://github.com/vaibhavmaurya20/GRIT-installation-v8)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%20x86--64-orange?style=flat-square)](https://github.com/vaibhavmaurya20/GRIT-installation-v8)
+[![Target](https://img.shields.io/badge/target-Linux%20x86--64-orange?style=flat-square)](#platform-support)
 [![Written In](https://img.shields.io/badge/written%20in-GRIT-00FF88?style=flat-square)](https://github.com/vaibhavmaurya20/GRIT-installation-v8)
 
 *One language. Zero dependencies. Native speed.*
 
-GRIT v8 is a **self-hosting compiler** written in GRIT that can compile `.gr` source into Linux x86-64 ELF64 binaries.
+GRIT v8 is a self-hosting compiler (written in GRIT) that compiles `.gr` source files to native Linux x86-64 ELF64 binaries.
 
-[Quick Start](#-60-second-quick-start) · [Installation](#-installation) · [Compiler Usage](#-compiler-usage) · [Examples](#-examples) · [Architecture](#-architecture) · [Troubleshooting](#-troubleshooting)
+[Quick Start](#-60-second-quick-start) · [Installation](#-installation) · [Usage](#-compiler-usage) · [Language](#-the-grit-language) · [Examples](#-examples) · [Architecture](#-architecture) · [Troubleshooting](#-troubleshooting)
 
 </div>
+
+---
+
+## Table of Contents
+
+- [✨ What Makes GRIT v8 Special](#-what-makes-grit-v8-special)
+- [⚡ 60-Second Quick Start](#-60-second-quick-start)
+- [📦 Installation](#-installation)
+  - [Platform Support](#platform-support)
+  - [Linux](#-linux)
+  - [macOS (Docker)](#-macos-docker)
+  - [Windows (WSL2)](#-windows-wsl2)
+- [✅ Verify Installation](#-verify-installation)
+- [🔧 Compiler Usage](#-compiler-usage)
+- [📝 Your First Program](#-your-first-program)
+- [📚 The GRIT Language](#-the-grit-language)
+- [🎯 Examples](#-examples)
+- [🏗 Architecture](#-architecture)
+- [🤖 AI Agent Build Notes](#-ai-agent-build-notes)
+- [🔴 Troubleshooting](#-troubleshooting)
+- [📁 Repository Structure](#-repository-structure)
+- [🤝 Contributing](#-contributing)
+- [📄 License](#-license)
 
 ---
 
@@ -32,30 +55,32 @@ GRIT v8 is a **self-hosting compiler** written in GRIT that can compile `.gr` so
 
 | Feature | Description |
 |---------|-------------|
-| 🚀 **Self-hosting** | Compiler source is GRIT (`src/bootstrap.gr`) |
-| ⚡ **Zero external compiler deps** | GRIT-generated binaries do not require GCC/LLVM |
-| 🪶 **Tiny runtime** | Minimal syscall-only runtime embedded in output |
-| 🧠 **Native output** | Emits Linux x86-64 ELF64 binaries |
-| 📖 **Readable syntax** | Indentation-first, Python-like style |
-| ✅ **Built-in self-test** | `--self-test` verifies lexer/parser/codegen/ELF pipeline |
+| 🚀 Self-hosting | Compiler source lives in `src/bootstrap.gr` (GRIT code) |
+| ⚡ Native output | Emits Linux x86-64 ELF64 binaries |
+| 🪶 Minimal runtime | Syscall-based runtime; no libc requirement for generated binaries |
+| 🧠 Clean syntax | Indentation-first, expression-friendly language style |
+| ✅ Built-in self-test | `--self-test` validates compiler pipeline end-to-end |
 
 ---
 
 ## ⚡ 60-Second Quick Start
 
 ```bash
+# 1) Clone
 git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8
 cd GRIT-installation-v8
-chmod +x bin/gritc build.sh run.sh
 
-# Run interpreted
+# 2) Mark executables
+chmod +x bin/gritc run.sh build.sh
+
+# 3) Run interpreted
 ./run.sh examples/hello.gr
 
-# Compile and run native binary
+# 4) Compile and run native binary
 ./build.sh examples/hello.gr -o hello && ./hello
 ```
 
-Expected output includes:
+Expected output:
 
 ```text
 Hello, GRIT!
@@ -65,29 +90,29 @@ Hello, GRIT!
 
 ## 📦 Installation
 
-## Platform Support
+### Platform Support
 
-| Platform | Run Interpreted | Compile to ELF | Run Compiled Binary |
-|----------|:---------------:|:--------------:|:-------------------:|
+| Platform | Interpreted | Compile to ELF | Run Compiled |
+|----------|:-----------:|:--------------:|:------------:|
 | Linux x86-64 | ✅ | ✅ | ✅ |
 | macOS (Intel/Apple Silicon) | ✅ via Docker | ✅ via Docker | ✅ via Docker |
 | Windows (WSL2 Ubuntu) | ✅ | ✅ | ✅ |
 | Linux ARM | ❌ | ❌ | ❌ |
 
-> `bin/gritc` and generated binaries are Linux x86-64 ELF64. Use Docker/WSL on non-Linux hosts.
+> `bin/gritc` and produced binaries are Linux x86-64. Use Docker/WSL on non-Linux hosts.
 
 ### 🐧 Linux
 
-**Recommended (repo-local use):**
+Recommended (repo-local workflow):
 
 ```bash
 git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8 ~/grit
 cd ~/grit
-chmod +x bin/gritc build.sh run.sh
+chmod +x bin/gritc run.sh build.sh
 ./build.sh --self-test
 ```
 
-**System-wide install (optional):**
+Optional system-wide install:
 
 ```bash
 sudo cp ~/grit/bin/gritc /usr/local/bin/grit
@@ -95,27 +120,23 @@ sudo chmod +x /usr/local/bin/grit
 /usr/local/bin/grit --version
 ```
 
-**User-local install (no sudo):**
+Optional user-local install (no sudo):
 
 ```bash
 mkdir -p "$HOME/.local/bin"
 cp ~/grit/bin/gritc "$HOME/.local/bin/grit"
 chmod +x "$HOME/.local/bin/grit"
-
 touch "$HOME/.bashrc"
 (grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc")
-
 export PATH="$HOME/.local/bin:$PATH"
 grit --version
 ```
 
-> If you installed only `grit` globally, compile commands that reference `src/bootstrap.gr` still require the GRIT repo path. Example:
->
-> `grit run ~/grit/src/bootstrap.gr ~/grit/examples/hello.gr -o hello`
+> Important: commands that reference `src/bootstrap.gr` still need the repository path (for example `~/grit/src/bootstrap.gr`).
 
 ### 🍎 macOS (Docker)
 
-1) Install and start Docker Desktop.
+1) Install Docker Desktop:
 
 ```bash
 brew install --cask docker
@@ -129,7 +150,7 @@ git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8 "$HOME/.grit-v
 chmod +x "$HOME/.grit-v8/bin/gritc"
 ```
 
-3) Add this helper function to `~/.zshrc` (or `~/.bashrc`):
+3) Add helper function to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 grit() {
@@ -141,11 +162,10 @@ grit() {
 }
 ```
 
-Reload shell and test:
+4) Reload shell and test:
 
 ```bash
-source ~/.zshrc
-
+source ~/.zshrc   # or: source ~/.bashrc
 grit --version
 grit run /grit/examples/hello.gr
 grit run /grit/src/bootstrap.gr /grit/examples/hello.gr -o /work/hello && ./hello
@@ -153,7 +173,7 @@ grit run /grit/src/bootstrap.gr /grit/examples/hello.gr -o /work/hello && ./hell
 
 ### 🪟 Windows (WSL2)
 
-In PowerShell (Admin):
+In PowerShell (Administrator):
 
 ```powershell
 wsl --install -d Ubuntu
@@ -164,13 +184,13 @@ Then in Ubuntu:
 ```bash
 git clone https://github.com/vaibhavmaurya20/GRIT-installation-v8 ~/grit
 cd ~/grit
-chmod +x bin/gritc build.sh run.sh
+chmod +x bin/gritc run.sh build.sh
 ./build.sh --self-test
 ```
 
 ---
 
-## ✅ Verify Your Installation
+## ✅ Verify Installation
 
 ```bash
 cd ~/grit
@@ -184,43 +204,37 @@ Expected:
 - version string prints,
 - self-test ends with `=== Tests complete ===`,
 - `examples/hello.gr` prints `Hello, GRIT!`,
-- fibonacci prints up through `55`.
+- fibonacci prints through `55`.
 
 ---
 
 ## 🔧 Compiler Usage
 
-### Two modes
+Two primary modes:
 
 ```bash
 # Interpreted mode (fast iteration)
-./run.sh <program.gr>
-# same as: ./bin/gritc run <program.gr>
+./run.sh myprogram.gr
+# equivalent:
+./bin/gritc run myprogram.gr
 
-# Native compile mode (Linux ELF64 output)
-./build.sh <program.gr> -o <output>
-./<output>
+# Native compile mode (Linux ELF64)
+./build.sh myprogram.gr -o myprogram
+./myprogram
 ```
 
-### Command reference
+Useful commands:
 
-```text
-./run.sh <source.gr>
-./build.sh <source.gr> -o <output>
+```bash
 ./build.sh --self-test
 ./build.sh --version
 ./build.sh --help
-```
-
-### Verbose compilation
-
-```bash
 ./build.sh examples/fibonacci.gr -o fib -v
 ```
 
 ---
 
-## 📝 Your First GRIT Program
+## 📝 Your First Program
 
 Create `hello.gr`:
 
@@ -246,12 +260,13 @@ Compile and run:
 
 ## 📚 The GRIT Language
 
-- Indentation-based blocks (4 spaces)
-- Comments use `#`
-- Entry point is `fn main`
-- Last expression is returned if not explicitly `return`
+Core rules:
+- 4-space indentation
+- line comments with `#`
+- every executable program defines `fn main`
+- last expression returns automatically if not using explicit `return`
 
-### Example syntax
+Example:
 
 ```grit
 fn add a:int b:int -> int
@@ -267,21 +282,21 @@ fn main
         i += 1
 ```
 
-Built-ins commonly used:
+Common built-ins:
 - `println(x)`, `print(x)`
 - `to_string(x)`
 - `len(x)`
-- `push(arr, val)`, `append(a, b)`
-- `read_file(path)`, `write_file(path, s)`
+- `push(arr, value)`, `append(a, b)`
+- `read_file(path)`, `write_file(path, content)`
 - `args()`
 
-For full details, see `docs/LANGUAGE_SPEC.md`.
+Full syntax/reference: `docs/LANGUAGE_SPEC.md`.
 
 ---
 
 ## 🎯 Examples
 
-Run interpreted:
+Run examples interpreted:
 
 ```bash
 ./run.sh examples/hello.gr
@@ -299,7 +314,7 @@ Compile all examples:
 make examples
 ```
 
-Run self-test automation:
+Run built-in self-test via Makefile:
 
 ```bash
 make test
@@ -309,7 +324,7 @@ make test
 
 ## 🏗 Architecture
 
-### 4-pass pipeline
+4-pass compiler pipeline:
 
 ```text
 Source (.gr)
@@ -317,24 +332,45 @@ Source (.gr)
   -> Parser (src/parser.gr)
   -> Native codegen (src/codegen_native.gr)
   -> ELF writer (src/elf64.gr)
-  -> Linux ELF64 binary
+  -> Linux ELF64
 ```
 
-### Core modules
+Current core modules:
 
-| File | Lines | Purpose |
-|------|------:|---------|
-| `src/bootstrap.gr` | 3235 | Combined self-hosting compiler |
+| File | Lines | Role |
+|------|------:|------|
+| `src/bootstrap.gr` | 3235 | Combined compiler |
+| `src/bytes.gr` | 63 | Byte helpers |
+| `src/elf64.gr` | 103 | ELF writer |
+| `src/x86_64.gr` | 252 | Instruction encoding |
+| `src/runtime.gr` | 222 | Syscall runtime |
 | `src/lexer.gr` | 304 | Lexer |
 | `src/parser.gr` | 1064 | Parser |
-| `src/codegen_native.gr` | 980 | Native code generator |
-| `src/elf64.gr` | 103 | ELF64 writer |
-| `src/x86_64.gr` | 252 | x86-64 instruction encoder |
-| `src/runtime.gr` | 222 | Syscall runtime |
-| `src/bytes.gr` | 63 | Byte utilities |
-| `src/grit8.gr` | 246 | CLI driver and self-tests |
+| `src/codegen_native.gr` | 980 | Native codegen |
+| `src/grit8.gr` | 246 | CLI driver + self-tests |
 
-For deeper details, see `docs/ARCHITECTURE.md`.
+Deep dive: `docs/ARCHITECTURE.md`.
+
+---
+
+## 🤖 AI Agent Build Notes
+
+When changing compiler internals (`src/*.gr`):
+
+1. Edit module(s).
+2. Rebuild bootstrap in module order:
+
+```bash
+cat src/bytes.gr src/elf64.gr src/x86_64.gr src/runtime.gr src/lexer.gr src/parser.gr src/codegen_native.gr src/grit8.gr > src/bootstrap.gr
+```
+
+3. Run validations:
+
+```bash
+./build.sh --self-test
+./run.sh examples/hello.gr
+./build.sh examples/fibonacci.gr -o fib && ./fib
+```
 
 ---
 
@@ -343,12 +379,12 @@ For deeper details, see `docs/ARCHITECTURE.md`.
 ### `Permission denied`
 
 ```bash
-chmod +x bin/gritc build.sh run.sh
+chmod +x bin/gritc run.sh build.sh
 ```
 
 ### `Exec format error` / `cannot execute binary file`
 
-You are likely on non-Linux-x86_64. Use Docker (macOS) or WSL2 (Windows).
+You're likely on non-Linux-x86_64 host. Use Docker (macOS) or WSL2 (Windows).
 
 ### Self-test fails
 
@@ -363,7 +399,7 @@ cd ~/grit
 which grit
 ```
 
-If missing, use either full path (`~/grit/bin/gritc`) or re-export PATH.
+If missing, use `~/grit/bin/gritc` directly or add the correct PATH export.
 
 ---
 
@@ -373,21 +409,23 @@ If missing, use either full path (`~/grit/bin/gritc`) or re-export PATH.
 GRIT-installation-v8/
 ├── README.md
 ├── Makefile
-├── build.sh
 ├── run.sh
+├── build.sh
 ├── bin/gritc
+├── examples/
 ├── src/
 │   ├── bootstrap.gr
-│   ├── lexer.gr
-│   ├── parser.gr
-│   ├── codegen_native.gr
+│   ├── bytes.gr
 │   ├── elf64.gr
 │   ├── x86_64.gr
 │   ├── runtime.gr
-│   ├── bytes.gr
+│   ├── lexer.gr
+│   ├── parser.gr
+│   ├── codegen_native.gr
 │   └── grit8.gr
-├── examples/
 └── docs/
+    ├── LANGUAGE_SPEC.md
+    └── ARCHITECTURE.md
 ```
 
 ---
@@ -400,11 +438,7 @@ cd GRIT-installation-v8
 ./build.sh --self-test
 ```
 
-When modifying compiler modules, rebuild bootstrap in this order:
-
-```bash
-cat src/bytes.gr src/elf64.gr src/x86_64.gr src/runtime.gr src/lexer.gr src/parser.gr src/codegen_native.gr src/grit8.gr > src/bootstrap.gr
-```
+When modifying compiler modules, regenerate `src/bootstrap.gr` (see command above), then rerun tests.
 
 ---
 
